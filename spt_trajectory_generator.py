@@ -1,4 +1,4 @@
-"""
+﻿"""
 SCIENTIFIC SPT TRAJECTORY GENERATOR - 2D & 3D
 ==============================================
 
@@ -19,9 +19,6 @@ import numpy as np
 from scipy import stats
 from scipy.stats import levy_stable
 from typing import Tuple, Optional, List
-import warnings
-warnings.filterwarnings('ignore')
-
 
 class PhysicalConstants:
     """
