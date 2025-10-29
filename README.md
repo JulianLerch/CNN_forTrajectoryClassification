@@ -270,7 +270,7 @@ from train_spt_classifier import run_complete_training
 # Training ausführen (ca. 30-60 Minuten)
 trainer = run_complete_training(
     n_samples_per_class=3000,  # 3000 Samples pro Klasse
-    dimensionality='2D',       # 2D oder 3D
+    dimensionality='2D',       # '2D' oder '3D'
     polymerization_degree=0.5, # 0.0-1.0
     epochs=100,                # Max Epochen
     batch_size=32,             # Batch Size
@@ -287,14 +287,13 @@ from train_spt_classifier import SPTClassifierTrainer
 # Initialisiere Trainer
 trainer = SPTClassifierTrainer(
     max_length=3000,
-    n_features=24,
     output_dir='./mein_modell'
 )
 
 # Schritt 1: Daten generieren
 trainer.generate_training_data(
     n_samples_per_class=3000,
-    dimensionality='2D',
+    mode='2D',
     polymerization_degree=0.5
 )
 
@@ -311,7 +310,22 @@ trainer.evaluate()
 trainer.save_model()
 ```
 
-### 3. Ausgabe-Dateien
+### 3. GUI-Anwendung
+
+Für ein interaktives Training mit Fortschrittsanzeige steht eine Tkinter-App bereit:
+
+```bash
+python spt_training_app.py
+```
+
+Funktionen der GUI:
+
+- 2D/3D/Both-Datengenerierung über Dropdown auswählbar
+- visuelle Live-Anzeige von Trainings- und Validierungs-Accuracy
+- Protokoll aller Konsolenmeldungen direkt im Fenster
+- Automatisches Speichern von Modell, Scaler, Feature-Liste und Trainingshistorie im gewählten Ordner
+
+### 4. Ausgabe-Dateien
 
 Nach dem Training werden folgende Dateien erstellt:
 

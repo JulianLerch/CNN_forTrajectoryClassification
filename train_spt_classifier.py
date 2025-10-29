@@ -27,8 +27,6 @@ import matplotlib.pyplot as plt
 import os
 import pickle
 from datetime import datetime
-import warnings
-warnings.filterwarnings('ignore')
 
 # TensorFlow/Keras Imports
 import tensorflow as tf
@@ -127,7 +125,7 @@ class SPTClassifierTrainer:
     
     def generate_training_data(
         self,
-        n_samples_per_class: int = 10000,
+        n_samples_per_class: int = 2000,
         mode: str = 'both',
         ratio_3d: float = 0.5,
         polymerization_degree: float = 0.5,
@@ -161,30 +159,85 @@ class SPTClassifierTrainer:
         4. **Lokalisierungs-PrÃ¤zision**: GauÃŸsches Rauschen
            Ïƒ_loc â‰ˆ 15 nm (typisch fÃ¼r TIRF-Mikroskopie)
         """
+        n_samples_per_class = int(n_samples_per_class)
+        if n_samples_per_class <= 0:
+            raise ValueError("n_samples_per_class must be a positive integer")
+
+        mode_normalized = mode.lower()
+        if mode_normalized not in {"2d", "3d", "both"}:
+            raise ValueError("mode must be one of '2D', '3D' or 'both'")
+
+        ratio_3d = float(np.clip(ratio_3d, 0.0, 1.0))
+
+        if mode_normalized == "2d":
+            generation_plan = [("2D", n_samples_per_class)]
+            self.input_dim = 2
+        elif mode_normalized == "3d":
+            generation_plan = [("3D", n_samples_per_class)]
+            self.input_dim = 3
+        else:
+            n_total = max(1, int(n_samples_per_class))
+            n_3d = int(round(n_total * ratio_3d))
+            n_3d = min(n_total, n_3d)
+            if ratio_3d > 0.0 and n_3d == 0:
+                n_3d = 1
+            n_2d = n_total - n_3d
+            if ratio_3d < 1.0 and n_2d == 0:
+                n_2d = 1
+                n_3d = max(0, n_total - 1)
+
+            generation_plan = []
+            if n_2d > 0:
+                generation_plan.append(("2D", n_2d))
+            if n_3d > 0:
+                generation_plan.append(("3D", n_3d))
+            self.input_dim = 3
+
+        D_min, D_max = PolymerDiffusionParameters.get_D_range(polymerization_degree)
+
         if verbose:
             print("\n" + "="*80)
             print("DATENGENERIERUNG")
             print("="*80)
-            print(f"DimensionalitÃ¤t: {dimensionality}")
+            print(f"Modus: {mode_normalized.upper()}")
+            if mode_normalized == "both":
+                plan_str = ", ".join([f"{dim}:{count}" for dim, count in generation_plan])
+                print(f"Aufteilung 2D/3D (pro Klasse): {plan_str}")
+            else:
+                print(f"DimensionalitÃ¤t: {generation_plan[0][0]}")
             print(f"Samples pro Klasse: {n_samples_per_class}")
             print(f"Polymerisationsgrad: {polymerization_degree:.1%}")
-            D_min, D_max = PolymerDiffusionParameters.get_D_range(polymerization_degree)
             print(f"Diffusionskoeffizient-Bereich: {D_min:.2e} - {D_max:.2e} ÂµmÂ²/s")
             print("="*80 + "\n")
-        
-        # Generiere Dataset
-        X_traj_list, y, lengths, class_names = generate_spt_dataset(
-            n_samples_per_class=n_samples_per_class,
-            min_length=50,
-            max_length=self.max_length,
-            dimensionality=dimensionality,
-            polymerization_degree=polymerization_degree,
-            dt=0.01,
-            localization_precision=0.015,
-            boost_classes=None,
-            verbose=verbose
-        )
-        
+
+        X_traj_list = []
+        y_parts = []
+        lengths_parts = []
+        class_names = None
+
+        for dim_label, n_dim_samples in generation_plan:
+            X_dim, y_dim, lengths_dim, class_names_dim = generate_spt_dataset(
+                n_samples_per_class=n_dim_samples,
+                min_length=50,
+                max_length=self.max_length,
+                dimensionality=dim_label,
+                polymerization_degree=polymerization_degree,
+                dt=0.01,
+                localization_precision=0.015,
+                boost_classes=None,
+                verbose=verbose
+            )
+
+            X_traj_list.extend(X_dim)
+            y_parts.append(y_dim)
+            lengths_parts.append(lengths_dim)
+
+            if class_names is None:
+                class_names = class_names_dim
+
+        y = np.concatenate(y_parts)
+        lengths = np.concatenate(lengths_parts)
+
         self.class_names = class_names
         
         if verbose:
@@ -228,11 +281,23 @@ class SPTClassifierTrainer:
             if L > self.max_length:
                 start = np.random.randint(0, L - self.max_length + 1)
                 segment = traj[start:start + self.max_length]
-                X_traj_padded[i, :, :] = segment.astype(np.float32)
             else:
-                length = L
-                X_traj_padded[i, :length, :] = traj[:length].astype(np.float32)
-        
+                segment = traj[:L]
+
+            segment = np.asarray(segment, dtype=np.float32)
+            if segment.ndim == 1:
+                segment = segment[:, np.newaxis]
+
+            if segment.shape[1] < self.input_dim:
+                padded = np.zeros((segment.shape[0], self.input_dim), dtype=np.float32)
+                padded[:, :segment.shape[1]] = segment
+                segment = padded
+            elif segment.shape[1] > self.input_dim:
+                segment = segment[:, :self.input_dim]
+
+            length = min(segment.shape[0], self.max_length)
+            X_traj_padded[i, :length, :] = segment[:length]
+
         if verbose:
             print(f"âœ… Padded Trajektorien: {X_traj_padded.shape}")
         
@@ -244,22 +309,47 @@ class SPTClassifierTrainer:
             print("Stratifiziert nach Klasse (erhÃ¤lt Klassenverteilung)")
             print("="*80 + "\n")
         
-        # Erst Test-Set abtrennen (15%)
+        y_array = np.asarray(y)
+        n_total = len(y_array)
+        class_counts = np.bincount(y_array.astype(int))
+        n_classes = len(class_counts)
+        stratify_test = y_array if np.all(class_counts >= 2) else None
+
+        test_size = int(round(n_total * 0.15))
+        if stratify_test is not None:
+            test_size = max(test_size, n_classes)
+        test_size = max(1, min(test_size, n_total - 1))
+        if stratify_test is not None and ((test_size < n_classes) or (n_total - test_size < n_classes)):
+            stratify_test = None
+
         X_traj_temp, X_traj_test, X_feat_temp, X_feat_test, y_temp, y_test = train_test_split(
             X_traj_padded, X_feat, y,
-            test_size=0.15,
-            stratify=y,
+            test_size=test_size,
+            stratify=stratify_test,
             random_state=self.random_seed
         )
-        
-        # Dann Val-Set von Rest (15% von 85% = ~13%)
+
+        y_temp_array = np.asarray(y_temp)
+        stratify_val = None
+        if stratify_test is not None:
+            temp_counts = np.bincount(y_temp_array.astype(int))
+            if np.all(temp_counts >= 2):
+                stratify_val = y_temp
+
+        val_size = int(round(len(y_temp) * 0.176))
+        if stratify_val is not None:
+            val_size = max(val_size, n_classes)
+        val_size = max(1, min(val_size, len(y_temp) - 1))
+        if stratify_val is not None and ((val_size < n_classes) or (len(y_temp) - val_size < n_classes)):
+            stratify_val = None
+
         X_traj_train, X_traj_val, X_feat_train, X_feat_val, y_train, y_val = train_test_split(
             X_traj_temp, X_feat_temp, y_temp,
-            test_size=0.176,  # 15/85 = 0.176
-            stratify=y_temp,
+            test_size=val_size,
+            stratify=stratify_val,
             random_state=self.random_seed
         )
-        
+
         if verbose:
             print(f"Train-Set: {len(X_traj_train)} samples ({len(X_traj_train)/len(X_traj_padded)*100:.1f}%)")
             print(f"Val-Set:   {len(X_traj_val)} samples ({len(X_traj_val)/len(X_traj_padded)*100:.1f}%)")
@@ -646,7 +736,8 @@ class SPTClassifierTrainer:
         self,
         epochs: int = 100,
         batch_size: int = 32,
-        verbose: int = 1
+        verbose: int = 1,
+        epoch_callback=None
     ):
         """
         Trainiere Modell mit Best Practices
@@ -655,6 +746,8 @@ class SPTClassifierTrainer:
             epochs: Maximale Anzahl Epochen
             batch_size: Batch Size
             verbose: Keras Verbosity (0, 1, 2)
+            epoch_callback: Optionaler Callback ``fn(epoch, logs, total_epochs)``
+                für externe Fortschrittsvisualisierung (z.B. GUI).
             
         Training-Strategie:
         -------------------
@@ -729,6 +822,24 @@ class SPTClassifierTrainer:
         ]
         
         # Training
+        callback_list = list(callbacks)
+
+        if epoch_callback is not None:
+            class EpochBridgeCallback(keras.callbacks.Callback):
+                def __init__(self, total_epochs: int, cb):
+                    super().__init__()
+                    self.total_epochs = total_epochs
+                    self.cb = cb
+
+                def on_epoch_end(self, epoch, logs=None):
+                    try:
+                        self.cb(epoch, logs or {}, self.total_epochs)
+                    except Exception:
+                        # Callback-Fehler sollen das Training nicht abbrechen
+                        pass
+
+            callback_list.append(EpochBridgeCallback(epochs, epoch_callback))
+
         history = self.model.fit(
             [self.X_traj_train, self.X_feat_train],
             self.y_train,
@@ -736,7 +847,7 @@ class SPTClassifierTrainer:
             epochs=epochs,
             batch_size=batch_size,
             class_weight=class_weights,
-            callbacks=callbacks,
+            callbacks=callback_list,
             verbose=verbose
         )
         
@@ -977,7 +1088,8 @@ def run_complete_training(
     # 1. Datengenerierung
     trainer.generate_training_data(
         n_samples_per_class=n_samples_per_class,
-        dimensionality=dimensionality,
+        mode=dimensionality,
+        ratio_3d=1.0 if dimensionality.lower() == '3d' else 0.0,
         polymerization_degree=polymerization_degree,
         verbose=True
     )
