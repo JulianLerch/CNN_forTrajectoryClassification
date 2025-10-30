@@ -338,6 +338,11 @@ Highlights der überarbeiteten Oberfläche:
 - Live-Plot für Trainings- und Validierungsgenauigkeit mit epochengenauer Aktualisierung
 - Strukturiertes Log aller Pipeline-Schritte (Datengenerierung → Modellbau → Training → Evaluation → Speichern)
 
+💡 **Hinweis zum Cache:** Der Trainer legt für jede eindeutige Kombination aus Dimensionalität, Polymerisationsgrad,
+Sample-Zahl und Trajektorienlänge eine validierte Cache-Datei an. Bei erneutem Start mit identischen Einstellungen
+wird dieser Cache geladen, inklusive der exakt rekonstruierten Feature-Skalierung – dadurch entfallen teure
+Regenerationen, ohne dass versehentlich mit veralteten Daten trainiert wird.
+
 ### 4. Ausgabe-Dateien
 
 ```

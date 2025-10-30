@@ -74,7 +74,8 @@ class DatasetBundle:
     y_test: ArrayLike
     lengths: ArrayLike
     class_names: List[str]
-    metadata: Dict[str, float] = field(default_factory=dict)
+    metadata: Dict[str, object] = field(default_factory=dict)
+    scaler_state: Dict[str, ArrayLike] = field(default_factory=dict)
 
 
 class EpochProgressCallback(keras.callbacks.Callback):
@@ -150,11 +151,17 @@ class SPTClassifierTrainer:
         )
 
         cache_path = config.cache_path or (self.output_dir / "cached_dataset.npz")
+        use_cache = False
         if reuse_cache and cache_path.is_file():
-            if verbose:
-                print(f"Loading cached dataset from {cache_path}")
-            bundle = self._load_cached_dataset(cache_path)
-        else:
+            if self._cache_matches_config(cache_path, config):
+                if verbose:
+                    print(f"Loading cached dataset from {cache_path}")
+                bundle = self._load_cached_dataset(cache_path)
+                use_cache = True
+            elif verbose:
+                print("Cached dataset configuration mismatch – regenerating …")
+
+        if not use_cache:
             if verbose:
                 print("Generating synthetic trajectories …")
             bundle = self._create_dataset(config, verbose=verbose)
@@ -164,6 +171,7 @@ class SPTClassifierTrainer:
         self.dataset = bundle
         self.class_names = bundle.class_names
         self.class_weights = self._compute_class_weights(bundle.y_train)
+        self._restore_scaler(bundle.scaler_state)
 
         if verbose:
             print(
@@ -350,6 +358,7 @@ class SPTClassifierTrainer:
             "max_length": self.max_length,
             "input_channels": 3,
             "class_weights": self.class_weights,
+            "class_names": self.class_names,
         }
         metadata_path = target_dir / "metadata.json"
         with open(metadata_path, "w", encoding="utf-8") as f:
@@ -372,7 +381,7 @@ class SPTClassifierTrainer:
 
         self.generate_training_data(config=config, verbose=verbose)
         self.build_model(verbose=verbose)
-        self.train(epochs=config.epochs, batch_size=config.batch_size, verbose=0 if verbose else 0)
+        self.train(epochs=config.epochs, batch_size=config.batch_size, verbose=1 if verbose else 0)
         self.evaluate(verbose=verbose)
         return self.save_model(verbose=verbose)
 
@@ -428,6 +437,17 @@ class SPTClassifierTrainer:
             config.polymerization_degree = float(np.clip(polymerization_degree, 0.0, 1.0))
         config.canonical_mode()  # validates mode
         return config
+
+    def _config_signature(self, config: TrainingConfig) -> Dict[str, object]:
+        mode = config.canonical_mode()
+        return {
+            "mode": mode,
+            "ratio_3d": round(float(config.ratio_3d), 6),
+            "polymerization_degree": round(float(config.polymerization_degree), 6),
+            "n_samples_per_class": int(config.n_samples_per_class),
+            "max_length": int(self.max_length),
+            "feature_dim": int(len(self.feature_extractor.feature_names)),
+        }
 
     def _create_dataset(self, config: TrainingConfig, *, verbose: bool) -> DatasetBundle:
         plan = self._plan_generation(config)
@@ -496,11 +516,17 @@ class SPTClassifierTrainer:
             lengths=lengths_array,
             class_names=class_names,
             metadata={
-                "polymerization_degree": config.polymerization_degree,
-                "ratio_3d": config.ratio_3d,
+                "polymerization_degree": float(config.polymerization_degree),
+                "ratio_3d": float(config.ratio_3d),
                 "mode": config.canonical_mode(),
-                "n_samples_per_class": config.n_samples_per_class,
+                "n_samples_per_class": int(config.n_samples_per_class),
+                "max_length": int(self.max_length),
+                "config_signature": self._config_signature(config),
+                "feature_names": list(self.feature_extractor.feature_names),
+                "class_names": class_names,
+                "total_samples": int(len(y)),
             },
+            scaler_state=self._capture_scaler_state(),
         )
         return bundle
 
@@ -572,26 +598,74 @@ class SPTClassifierTrainer:
         reduce = keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=max(3, epochs // 6), monitor="val_loss", min_lr=1e-5)
         return [early, reduce]
 
+    def _cache_matches_config(self, path: Path, config: TrainingConfig) -> bool:
+        try:
+            with np.load(path, allow_pickle=True) as data:
+                metadata_raw = data.get("metadata")
+                if metadata_raw is None:
+                    return False
+                if hasattr(metadata_raw, "item"):
+                    metadata_raw = metadata_raw.item()
+                metadata = json.loads(str(metadata_raw))
+        except Exception:
+            return False
+
+        stored_signature = metadata.get("config_signature")
+        if not isinstance(stored_signature, dict):
+            return False
+        expected = self._config_signature(config)
+        return self._signatures_match(stored_signature, expected)
+
     def _store_cached_dataset(self, path: Path, bundle: DatasetBundle) -> None:
-        np.savez_compressed(
-            path,
-            X_traj_train=bundle.X_traj_train,
-            X_traj_val=bundle.X_traj_val,
-            X_traj_test=bundle.X_traj_test,
-            X_feat_train=bundle.X_feat_train,
-            X_feat_val=bundle.X_feat_val,
-            X_feat_test=bundle.X_feat_test,
-            y_train=bundle.y_train,
-            y_val=bundle.y_val,
-            y_test=bundle.y_test,
-            lengths=bundle.lengths,
-            class_names=np.array(bundle.class_names, dtype=object),
-            metadata=json.dumps(bundle.metadata),
-        )
+        payload = {
+            "X_traj_train": bundle.X_traj_train,
+            "X_traj_val": bundle.X_traj_val,
+            "X_traj_test": bundle.X_traj_test,
+            "X_feat_train": bundle.X_feat_train,
+            "X_feat_val": bundle.X_feat_val,
+            "X_feat_test": bundle.X_feat_test,
+            "y_train": bundle.y_train,
+            "y_val": bundle.y_val,
+            "y_test": bundle.y_test,
+            "lengths": bundle.lengths,
+            "class_names": np.array(bundle.class_names, dtype=object),
+            "metadata": json.dumps(bundle.metadata),
+        }
+        if bundle.scaler_state:
+            if bundle.scaler_state.get("mean") is not None:
+                payload["scaler_mean"] = np.asarray(bundle.scaler_state["mean"], dtype=np.float64)
+            if bundle.scaler_state.get("scale") is not None:
+                payload["scaler_scale"] = np.asarray(bundle.scaler_state["scale"], dtype=np.float64)
+            if bundle.scaler_state.get("var") is not None:
+                payload["scaler_var"] = np.asarray(bundle.scaler_state["var"], dtype=np.float64)
+            if bundle.scaler_state.get("n_features") is not None:
+                payload["scaler_n_features"] = np.asarray(bundle.scaler_state["n_features"], dtype=np.int64)
+            if bundle.scaler_state.get("n_samples") is not None:
+                payload["scaler_n_samples"] = np.asarray(bundle.scaler_state["n_samples"], dtype=np.int64)
+            if "feature_names" in bundle.scaler_state:
+                payload["scaler_feature_names"] = np.asarray(bundle.scaler_state["feature_names"], dtype=object)
+
+        np.savez_compressed(path, **payload)
 
     def _load_cached_dataset(self, path: Path) -> DatasetBundle:
         with np.load(path, allow_pickle=True) as data:
-            metadata = json.loads(str(data["metadata"]))
+            metadata_raw = data["metadata"]
+            if hasattr(metadata_raw, "item"):
+                metadata_raw = metadata_raw.item()
+            metadata = json.loads(str(metadata_raw))
+            scaler_state: Dict[str, ArrayLike] = {}
+            if "scaler_mean" in data:
+                scaler_state["mean"] = data["scaler_mean"]
+            if "scaler_scale" in data:
+                scaler_state["scale"] = data["scaler_scale"]
+            if "scaler_var" in data:
+                scaler_state["var"] = data["scaler_var"]
+            if "scaler_n_features" in data:
+                scaler_state["n_features"] = data["scaler_n_features"]
+            if "scaler_n_samples" in data:
+                scaler_state["n_samples"] = data["scaler_n_samples"]
+            if "scaler_feature_names" in data:
+                scaler_state["feature_names"] = data["scaler_feature_names"]
             return DatasetBundle(
                 X_traj_train=data["X_traj_train"],
                 X_traj_val=data["X_traj_val"],
@@ -605,7 +679,70 @@ class SPTClassifierTrainer:
                 lengths=data["lengths"],
                 class_names=list(data["class_names"].tolist()),
                 metadata=metadata,
+                scaler_state=scaler_state,
             )
+
+    def _capture_scaler_state(self) -> Dict[str, ArrayLike]:
+        state: Dict[str, ArrayLike] = {
+            "mean": np.asarray(self.scaler.mean_, dtype=np.float64),
+            "scale": np.asarray(self.scaler.scale_, dtype=np.float64),
+            "var": np.asarray(self.scaler.var_, dtype=np.float64),
+            "n_features": np.asarray([self.scaler.n_features_in_], dtype=np.int64),
+            "n_samples": np.asarray([int(getattr(self.scaler, "n_samples_seen_", 0))], dtype=np.int64),
+        }
+        if hasattr(self.scaler, "feature_names_in_"):
+            state["feature_names"] = np.asarray(self.scaler.feature_names_in_, dtype=object)
+        return state
+
+    def _restore_scaler(self, scaler_state: Dict[str, ArrayLike]) -> None:
+        if not scaler_state:
+            return
+
+        mean = scaler_state.get("mean")
+        scale = scaler_state.get("scale")
+        var = scaler_state.get("var")
+        if mean is None or scale is None or var is None:
+            return
+
+        self.scaler.mean_ = np.asarray(mean, dtype=np.float64)
+        self.scaler.scale_ = np.asarray(scale, dtype=np.float64)
+        self.scaler.var_ = np.asarray(var, dtype=np.float64)
+        n_features = scaler_state.get("n_features")
+        if n_features is not None:
+            self.scaler.n_features_in_ = int(np.asarray(n_features).ravel()[0])
+        else:
+            self.scaler.n_features_in_ = self.scaler.mean_.shape[0]
+        n_samples = scaler_state.get("n_samples")
+        if n_samples is not None:
+            seen = int(np.asarray(n_samples).ravel()[0])
+            self.scaler.n_samples_seen_ = max(1, seen)
+        else:
+            self.scaler.n_samples_seen_ = max(1, self.scaler.mean_.shape[0])
+
+        feature_names = scaler_state.get("feature_names")
+        if feature_names is not None:
+            names = [str(x) for x in np.asarray(feature_names).ravel()]
+            if names:
+                self.scaler.feature_names_in_ = np.asarray(names, dtype=object)
+
+    @staticmethod
+    def _signatures_match(stored: Dict[str, object], expected: Dict[str, object], tol: float = 1e-6) -> bool:
+        for key, expected_value in expected.items():
+            if key not in stored:
+                return False
+            value = stored[key]
+            if isinstance(value, np.generic):
+                value = value.item()
+            if isinstance(expected_value, float):
+                try:
+                    if abs(float(value) - expected_value) > tol:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            else:
+                if value != expected_value:
+                    return False
+        return True
 
     @staticmethod
     def _set_random_seeds(seed: int) -> None:
