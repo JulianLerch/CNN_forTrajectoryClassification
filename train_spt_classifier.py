@@ -213,10 +213,12 @@ class SPTClassifierTrainer:
         X_traj_list = []
         y_parts = []
         lengths_parts = []
+        D_values_parts = []
+        poly_degrees_parts = []
         class_names = None
 
         for dim_label, n_dim_samples in generation_plan:
-            X_dim, y_dim, lengths_dim, class_names_dim = generate_spt_dataset(
+            X_dim, y_dim, lengths_dim, class_names_dim, D_dim, poly_dim = generate_spt_dataset(
                 n_samples_per_class=n_dim_samples,
                 min_length=50,
                 max_length=self.max_length,
@@ -225,18 +227,24 @@ class SPTClassifierTrainer:
                 dt=0.01,
                 localization_precision=0.015,
                 boost_classes=None,
-                verbose=verbose
+                verbose=verbose,
+                use_full_D_range=True,
+                augment_polymerization=True
             )
 
             X_traj_list.extend(X_dim)
             y_parts.append(y_dim)
             lengths_parts.append(lengths_dim)
+            D_values_parts.append(D_dim)
+            poly_degrees_parts.append(poly_dim)
 
             if class_names is None:
                 class_names = class_names_dim
 
         y = np.concatenate(y_parts)
         lengths = np.concatenate(lengths_parts)
+        D_values = np.concatenate(D_values_parts)
+        poly_degrees = np.concatenate(poly_degrees_parts)
 
         self.class_names = class_names
         
@@ -259,11 +267,26 @@ class SPTClassifierTrainer:
             print("="*80 + "\n")
         
         X_feat = self.feature_extractor.extract_batch(X_traj_list)
-        
+
+        # Füge D-Werte, Polymerisierungsgrad und Dimensionalität als zusätzliche Features hinzu
+        # Diese erweitern die 24 physikalischen Features
+        D_log = np.log10(D_values).reshape(-1, 1)  # Log-transformiert für bessere Skalierung
+        poly_feat = poly_degrees.reshape(-1, 1)
+
+        # Dimensionalität als Feature: 0 für 2D, 1 für 3D
+        dim_feat = np.array([0.0 if traj.shape[1] == 2 else 1.0 for traj in X_traj_list]).reshape(-1, 1)
+
+        # Kombiniere alle Features
+        X_feat = np.concatenate([X_feat, D_log, poly_feat, dim_feat], axis=1)
+
         self.n_features = X_feat.shape[1]
         if verbose:
             print(f"\nâœ… Feature-Matrix: {X_feat.shape}")
-            print(f"   Features pro Sample: {X_feat.shape[1]}")
+            print(f"   Basis-Features: 24")
+            print(f"   + D-Wert (log10): 1")
+            print(f"   + Polymerisierungsgrad: 1")
+            print(f"   + Dimensionalität (2D/3D): 1")
+            print(f"   = Gesamt: {X_feat.shape[1]} Features pro Sample")
         
         # Padding der Trajektorien
         if verbose:
@@ -550,7 +573,7 @@ class SPTClassifierTrainer:
         n_3d = int(round(n_samples_per_class * ratio_3d))
         n_2d = n_samples_per_class - n_3d
 
-        X2, y2, l2, _ = generate_spt_dataset(
+        X2, y2, l2, _, D2, poly2 = generate_spt_dataset(
             n_samples_per_class=n_2d,
             min_length=50,
             max_length=self.max_length,
@@ -559,9 +582,11 @@ class SPTClassifierTrainer:
             dt=0.01,
             localization_precision=0.015,
             boost_classes=None,
-            verbose=verbose
+            verbose=verbose,
+            use_full_D_range=True,
+            augment_polymerization=True
         )
-        X3, y3, l3, _ = generate_spt_dataset(
+        X3, y3, l3, _, D3, poly3 = generate_spt_dataset(
             n_samples_per_class=n_3d,
             min_length=50,
             max_length=self.max_length,
@@ -570,7 +595,9 @@ class SPTClassifierTrainer:
             dt=0.01,
             localization_precision=0.015,
             boost_classes=None,
-            verbose=verbose
+            verbose=verbose,
+            use_full_D_range=True,
+            augment_polymerization=True
         )
 
         X_traj_list = X2 + X3
@@ -654,8 +681,10 @@ class SPTClassifierTrainer:
             # Generator produziert alle Klassen; wir filtern gezielt auf target_class_index
             # Wir rufen iterativ mit moderater Stückzahl auf, bis genug gesammelt.
             chunk = max(50, need)  # pro Klasse
+            D_acc = []
+            poly_acc = []
             while len(X_acc) < need:
-                X_list, y_arr, lengths_arr, _ = generate_spt_dataset(
+                X_list, y_arr, lengths_arr, _, D_arr, poly_arr = generate_spt_dataset(
                     n_samples_per_class=chunk,
                     min_length=50,
                     max_length=self.max_length,
@@ -664,26 +693,32 @@ class SPTClassifierTrainer:
                     dt=0.01,
                     localization_precision=0.015,
                     boost_classes=None,
-                    verbose=False
+                    verbose=False,
+                    use_full_D_range=True,
+                    augment_polymerization=True
                 )
-                for X_i, y_i, L_i in zip(X_list, y_arr, lengths_arr):
+                for X_i, y_i, L_i, D_i, poly_i in zip(X_list, y_arr, lengths_arr, D_arr, poly_arr):
                     if y_i == target_class_index:
                         X_acc.append(X_i)
                         y_acc.append(y_i)
                         lengths_acc.append(L_i)
+                        D_acc.append(D_i)
+                        poly_acc.append(poly_i)
                         if len(X_acc) >= need:
                             break
-            return X_acc, np.array(y_acc), np.array(lengths_acc)
+            return X_acc, np.array(y_acc), np.array(lengths_acc), np.array(D_acc), np.array(poly_acc)
 
-        X2_list, y2, _ = [], np.array([]), None
-        X3_list, y3, _ = [], np.array([]), None
+        X2_list, y2, _, D2, poly2 = [], np.array([]), None, np.array([]), np.array([])
+        X3_list, y3, _, D3, poly3 = [], np.array([]), None, np.array([]), np.array([])
         if n2d > 0:
-            X2_list, y2, _ = sample_class('2D', n2d)
+            X2_list, y2, _, D2, poly2 = sample_class('2D', n2d)
         if n3d > 0:
-            X3_list, y3, _ = sample_class('3D', n3d)
+            X3_list, y3, _, D3, poly3 = sample_class('3D', n3d)
 
         X_new_list = X2_list + X3_list
         y_new = np.concatenate([y2, y3]) if y2.size or y3.size else np.array([])
+        D_new = np.concatenate([D2, D3]) if D2.size or D3.size else np.array([])
+        poly_new = np.concatenate([poly2, poly3]) if poly2.size or poly3.size else np.array([])
 
         # Shuffle neu generierte
         if len(X_new_list) == 0:
@@ -695,11 +730,15 @@ class SPTClassifierTrainer:
         rng.shuffle(idx)
         X_new_list = [X_new_list[i] for i in idx]
         y_new = y_new[idx]
+        D_new = D_new[idx]
+        poly_new = poly_new[idx]
 
-        # Feature-Extraktion + is_3D-Feature
+        # Feature-Extraktion + D, Poly, Dim Features
         X_new_feat = self.feature_extractor.extract_batch(X_new_list)
-        is_3d = np.array([1 if traj.shape[1] == 3 else 0 for traj in X_new_list], dtype=float).reshape(-1, 1)
-        X_new_feat = np.concatenate([X_new_feat, is_3d], axis=1)
+        D_log = np.log10(D_new).reshape(-1, 1)
+        poly_feat = poly_new.reshape(-1, 1)
+        dim_feat = np.array([0.0 if traj.shape[1] == 2 else 1.0 for traj in X_new_list]).reshape(-1, 1)
+        X_new_feat = np.concatenate([X_new_feat, D_log, poly_feat, dim_feat], axis=1)
         # Transform mit bestehendem Scaler (nicht neu fitten, um Val/Test konsistent zu halten)
         X_new_feat_scaled = self.scaler.transform(X_new_feat)
 

@@ -21,6 +21,8 @@ from scipy.optimize import curve_fit
 from scipy.spatial.distance import pdist, squareform
 from typing import Dict, List, Tuple, Optional
 import warnings
+from multiprocessing import Pool, cpu_count
+from functools import partial
 warnings.filterwarnings('ignore')
 
 
@@ -794,35 +796,54 @@ class SPTFeatureExtractor:
             ranges = np.ptp(trajectory, axis=0)
             return np.prod(ranges)
     
-    def extract_batch(self, trajectories: List[np.ndarray]) -> np.ndarray:
+    def extract_batch(self, trajectories: List[np.ndarray], n_jobs: int = -1) -> np.ndarray:
         """
-        Batch-Extraktion fÃ¼r Liste von Trajektorien
-        
+        Batch-Extraktion fÃ¼r Liste von Trajektorien (parallelisiert!)
+
         Args:
             trajectories: Liste von (n_i, d) arrays
-            
+            n_jobs: Anzahl parallele Prozesse (-1 = alle CPUs)
+
         Returns:
             feature_matrix: (n_samples, n_features) array
         """
         n_samples = len(trajectories)
         n_features = len(self.feature_names)
-        
-        feature_matrix = np.zeros((n_samples, n_features))
-        
-        print(f"ðŸ”¬ Extrahiere wissenschaftliche Features fÃ¼r {n_samples} Trajektorien...")
-        
-        for i, traj in enumerate(trajectories):
-            if i % 500 == 0:
-                print(f"   {i}/{n_samples}", end='\r')
-            
-            features = self.extract_all_features(traj)
-            
-            for j, name in enumerate(self.feature_names):
-                feature_matrix[i, j] = features[name]
-        
-        print(f"   {n_samples}/{n_samples}")
+
+        print(f"ðŸ"¬ Extrahiere wissenschaftliche Features fÃ¼r {n_samples} Trajektorien...")
+
+        # Bestimme Anzahl Prozesse
+        if n_jobs == -1:
+            n_jobs = max(1, cpu_count() - 1)  # Lasse 1 CPU frei
+        else:
+            n_jobs = max(1, min(n_jobs, cpu_count()))
+
+        # Für kleine Datensätze: sequentiell (Overhead vermeiden)
+        if n_samples < 100 or n_jobs == 1:
+            print(f"   Sequentielle Verarbeitung...")
+            feature_matrix = np.zeros((n_samples, n_features))
+            for i, traj in enumerate(trajectories):
+                if i % 500 == 0:
+                    print(f"   {i}/{n_samples}", end='\r')
+                features = self.extract_all_features(traj)
+                for j, name in enumerate(self.feature_names):
+                    feature_matrix[i, j] = features[name]
+            print(f"   {n_samples}/{n_samples}")
+        else:
+            # Parallelisierte Verarbeitung
+            print(f"   Parallele Verarbeitung mit {n_jobs} Prozessen...")
+            with Pool(processes=n_jobs) as pool:
+                # Extrahiere Features parallel
+                results = pool.map(self.extract_all_features, trajectories)
+
+            # Konvertiere Liste von Dicts zu Matrix
+            feature_matrix = np.zeros((n_samples, n_features))
+            for i, features in enumerate(results):
+                for j, name in enumerate(self.feature_names):
+                    feature_matrix[i, j] = features[name]
+
         print(f"âœ… Feature-Matrix: {feature_matrix.shape}")
-        
+
         return feature_matrix
 
 

@@ -168,8 +168,8 @@ ASTIGMATISM_CALIBRATION = {
 # 7. DATENGENERIERUNGS-PARAMETER
 # =============================================================================
 
-# Anzahl Samples pro Klasse
-N_SAMPLES_PER_CLASS = 5000
+# Anzahl Samples pro Klasse (ERHÖHT für bessere Generalisierung!)
+N_SAMPLES_PER_CLASS = 10000  # War 5000, jetzt 10000 für robusteres Training
 
 # Class Balance
 CLASS_WEIGHTS = {
@@ -201,16 +201,17 @@ NN_ARCHITECTURE = {
     'use_residual': True    # Residual Connections
 }
 
-# Training
+# Training (OPTIMIERT für schnelleres & besseres Training!)
 TRAINING_CONFIG = {
-    'batch_size': 256,
-    'epochs': 100,
-    'learning_rate': 1e-4,
+    'batch_size': 512,       # Erhöht von 256 -> schnelleres Training
+    'epochs': 150,           # Erhöht von 100 -> mehr Zeit für Konvergenz
+    'learning_rate': 3e-4,   # Erhöht von 1e-4 -> schnellere Konvergenz
     'optimizer': 'adamw',
     'loss': 'categorical_crossentropy',
-    'early_stopping_patience': 15,
-    'reduce_lr_patience': 8,
-    'min_lr': 1e-7
+    'early_stopping_patience': 20,  # Erhöht von 15 -> mehr Geduld
+    'reduce_lr_patience': 7,    # Reduziert von 8 -> schnellere LR-Anpassung
+    'min_lr': 1e-7,
+    'reduce_lr_factor': 0.3  # NEU: Aggressivere LR-Reduktion
 }
 
 # Target Performance
