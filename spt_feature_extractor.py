@@ -810,7 +810,7 @@ class SPTFeatureExtractor:
         n_samples = len(trajectories)
         n_features = len(self.feature_names)
 
-        print(f"ðŸ"¬ Extrahiere wissenschaftliche Features fÃ¼r {n_samples} Trajektorien...")
+        print(f"Extrahiere wissenschaftliche Features fÃ¼r {n_samples} Trajektorien...")
 
         # Bestimme Anzahl Prozesse
         if n_jobs == -1:
@@ -842,14 +842,14 @@ class SPTFeatureExtractor:
                 for j, name in enumerate(self.feature_names):
                     feature_matrix[i, j] = features[name]
 
-        print(f"âœ… Feature-Matrix: {feature_matrix.shape}")
+        print(f"Feature-Matrix: {feature_matrix.shape}")
 
         return feature_matrix
 
 
 if __name__ == "__main__":
     # Test
-    print("\nðŸ§ª TEST: Wissenschaftliche Feature-Extraktion")
+    print("\nTEST: Wissenschaftliche Feature-Extraktion")
     print("="*80)
     
     from spt_trajectory_generator import generate_normal_diffusion_spt
@@ -876,5 +876,5 @@ if __name__ == "__main__":
     print(f"   msd_alpha: {features_3d['msd_alpha']:.3f}")
     print(f"   asphericity: {features_3d['asphericity']:.3f}")
     
-    print("\nâœ… Feature-Extraktion erfolgreich!")
+    print("\nFeature-Extraktion erfolgreich!")
     print("="*80)

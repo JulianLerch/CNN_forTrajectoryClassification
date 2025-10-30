@@ -614,7 +614,7 @@ def generate_spt_dataset(
     
     if verbose:
         print("="*80)
-        print("ðŸ"¬ WISSENSCHAFTLICHE SPT-TRAJEKTORIEN-GENERIERUNG")
+        print("WISSENSCHAFTLICHE SPT-TRAJEKTORIEN-GENERIERUNG")
         print("="*80)
         print(f"DimensionalitÃ¤t: {dimensionality}")
         if augment_polymerization:
@@ -667,7 +667,7 @@ def generate_spt_dataset(
         poly_degrees.append(poly_deg)
     
     if verbose:
-        print(f"   âœ… {n_normal} Normal generiert\n")
+        print(f"   {n_normal} Normal generiert\n")
     
     # === KLASSE 1: SUBDIFFUSION ===
     n_sub = n_samples_per_class * 2 if 'Subdiffusion' in boost_classes else n_samples_per_class
@@ -713,7 +713,7 @@ def generate_spt_dataset(
         poly_degrees.append(poly_deg)
     
     if verbose:
-        print(f"   âœ… {n_sub} Subdiffusion generiert\n")
+        print(f"   {n_sub} Subdiffusion generiert\n")
     
     # === KLASSE 2: SUPERDIFFUSION ===
     n_super = n_samples_per_class * 2 if 'Superdiffusion' in boost_classes else n_samples_per_class
@@ -754,7 +754,7 @@ def generate_spt_dataset(
         poly_degrees.append(poly_deg)
     
     if verbose:
-        print(f"   âœ… {n_super} Superdiffusion generiert\n")
+        print(f"   {n_super} Superdiffusion generiert\n")
     
     # === KLASSE 3: CONFINED ===
     n_conf = n_samples_per_class * 2 if 'Confined' in boost_classes else n_samples_per_class
@@ -803,7 +803,7 @@ def generate_spt_dataset(
         poly_degrees.append(poly_deg)
     
     if verbose:
-        print(f"   âœ… {n_conf} Confined generiert\n")
+        print(f"   {n_conf} Confined generiert\n")
     
     y = np.array(y)
     lengths = np.array(lengths)
@@ -812,7 +812,7 @@ def generate_spt_dataset(
 
     if verbose:
         print("="*80)
-        print("âœ… DATENSATZ VOLLSTÃ„NDIG!")
+        print("DATENSATZ VOLLSTÃ„NDIG!")
         print("="*80)
         print(f"Gesamt-Samples: {len(X)}")
         print(f"Dimensionen: {X[0].shape[1]}D")
@@ -836,7 +836,7 @@ def generate_spt_dataset(
 
 if __name__ == "__main__":
     # Test-Generation
-    print("\nðŸ§ª TEST: Wissenschaftliche SPT-Trajektorien")
+    print("\nTEST: Wissenschaftliche SPT-Trajektorien")
     print("="*80)
     
     # 2D Test
@@ -851,7 +851,7 @@ if __name__ == "__main__":
         augment_polymerization=True
     )
 
-    print(f"\nâœ… 2D Datensatz: {len(X_2d)} Trajektorien")
+    print(f"\n2D Datensatz: {len(X_2d)} Trajektorien")
     print(f"   Beispiel-Shape: {X_2d[0].shape}")
     print(f"   D-Range: {D_2d.min():.4f} - {D_2d.max():.3f}")
 
@@ -868,7 +868,7 @@ if __name__ == "__main__":
         augment_polymerization=True
     )
     
-    print(f"\nâœ… 3D Datensatz: {len(X_3d)} Trajektorien")
+    print(f"\n3D Datensatz: {len(X_3d)} Trajektorien")
     print(f"   Beispiel-Shape: {X_3d[0].shape}")
     
     print("\n" + "="*80)

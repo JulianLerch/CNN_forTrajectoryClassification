@@ -249,7 +249,7 @@ class SPTClassifierTrainer:
         self.class_names = class_names
         
         if verbose:
-            print(f"\nâœ… {len(X_traj_list)} Trajektorien generiert")
+            print(f"\n{len(X_traj_list)} Trajektorien generiert")
             print(f"   Klassen: {class_names}")
             print(f"   LÃ¤ngen: {lengths.min()}-{lengths.max()} Frames")
         
@@ -281,7 +281,7 @@ class SPTClassifierTrainer:
 
         self.n_features = X_feat.shape[1]
         if verbose:
-            print(f"\nâœ… Feature-Matrix: {X_feat.shape}")
+            print(f"\nFeature-Matrix: {X_feat.shape}")
             print(f"   Basis-Features: 24")
             print(f"   + D-Wert (log10): 1")
             print(f"   + Polymerisierungsgrad: 1")
@@ -322,7 +322,7 @@ class SPTClassifierTrainer:
             X_traj_padded[i, :length, :] = segment[:length]
 
         if verbose:
-            print(f"âœ… Padded Trajektorien: {X_traj_padded.shape}")
+            print(f"Padded Trajektorien: {X_traj_padded.shape}")
         
         # Train-Val-Test Split (stratifiziert)
         if verbose:
@@ -392,7 +392,7 @@ class SPTClassifierTrainer:
         X_feat_test = self.scaler.transform(X_feat_test)
         
         if verbose:
-            print("âœ… Features standardisiert")
+            print("Features standardisiert")
             print(f"   Train Mean: {np.mean(X_feat_train):.4f}, Std: {np.std(X_feat_train):.4f}")
             print(f"   Val Mean:   {np.mean(X_feat_val):.4f}, Std: {np.std(X_feat_val):.4f}")
         
@@ -408,7 +408,7 @@ class SPTClassifierTrainer:
         self.y_test = y_test
         
         if verbose:
-            print("\nâœ… Daten erfolgreich vorbereitet!")
+            print("\nDaten erfolgreich vorbereitet!")
     
     def build_model(self, verbose: bool = True):
         """
@@ -548,7 +548,7 @@ class SPTClassifierTrainer:
         self.model = model
         
         if verbose:
-            print("âœ… Modell konstruiert und kompiliert")
+            print("Modell konstruiert und kompiliert")
             print(f"\nParameter: {model.count_params():,}")
             print("\nModel Summary:")
             model.summary()
@@ -892,7 +892,7 @@ class SPTClassifierTrainer:
         
         self.history = history
         
-        print("\nâœ… Training abgeschlossen!")
+        print("\nTraining abgeschlossen!")
         
         # Plot Training History
         self.plot_training_history()
@@ -921,7 +921,7 @@ class SPTClassifierTrainer:
         
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, 'training_history.png'), dpi=150)
-        print(f"âœ… Training History Plot gespeichert: {self.output_dir}/training_history.png")
+        print(f"Training History Plot gespeichert: {self.output_dir}/training_history.png")
         try:
             plt.close()
         except Exception:
@@ -1010,7 +1010,7 @@ class SPTClassifierTrainer:
         plt.title('Confusion Matrix - Test Set', fontsize=14, fontweight='bold')
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, 'confusion_matrix.png'), dpi=150)
-        print(f"\nâœ… Confusion Matrix gespeichert: {self.output_dir}/confusion_matrix.png")
+        print(f"\nConfusion Matrix gespeichert: {self.output_dir}/confusion_matrix.png")
         try:
             plt.close()
         except Exception:
@@ -1041,21 +1041,21 @@ class SPTClassifierTrainer:
         model_path = os.path.join(self.output_dir, 'spt_classifier.keras')
         self.model.save(model_path)
         if verbose:
-            print(f"âœ… Modell gespeichert: {model_path}")
+            print(f"Modell gespeichert: {model_path}")
         
         # Scaler
         scaler_path = os.path.join(self.output_dir, 'feature_scaler.pkl')
         with open(scaler_path, 'wb') as f:
             pickle.dump(self.scaler, f)
         if verbose:
-            print(f"âœ… Feature Scaler gespeichert: {scaler_path}")
+            print(f"Feature Scaler gespeichert: {scaler_path}")
         
         # Feature Names
         feature_names_path = os.path.join(self.output_dir, 'feature_names.pkl')
         with open(feature_names_path, 'wb') as f:
             pickle.dump(list(self.feature_extractor.feature_names) + ['is_3D'], f)
         if verbose:
-            print(f"âœ… Feature Names gespeichert: {feature_names_path}")
+            print(f"Feature Names gespeichert: {feature_names_path}")
         
         # Metadata
         metadata = {
@@ -1073,7 +1073,7 @@ class SPTClassifierTrainer:
             import json
             json.dump(metadata, f, indent=2)
         if verbose:
-            print(f"âœ… Metadata gespeichert: {metadata_path}")
+            print(f"Metadata gespeichert: {metadata_path}")
         
         # Training History
         if self.history is not None:
@@ -1081,11 +1081,11 @@ class SPTClassifierTrainer:
             with open(history_path, 'wb') as f:
                 pickle.dump(self.history.history, f)
             if verbose:
-                print(f"âœ… Training History gespeichert: {history_path}")
+                print(f"Training History gespeichert: {history_path}")
         
         if verbose:
             print("="*80)
-            print(f"âœ… ALLE DATEIEN IN: {self.output_dir}/")
+            print(f"ALLE DATEIEN IN: {self.output_dir}/")
             print("="*80)
 
 
@@ -1150,7 +1150,7 @@ def run_complete_training(
     trainer.save_model(verbose=True)
     
     print("\n" + "="*80)
-    print("âœ… TRAINING ERFOLGREICH ABGESCHLOSSEN!")
+    print("TRAINING ERFOLGREICH ABGESCHLOSSEN!")
     print(f"Ende: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*80)
     
