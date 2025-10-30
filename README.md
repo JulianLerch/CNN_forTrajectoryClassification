@@ -13,13 +13,14 @@
 2. [Mathematische Grundlagen](#mathematische-grundlagen)
 3. [Systemarchitektur](#systemarchitektur)
 4. [Installation & Anforderungen](#installation--anforderungen)
-5. [Schnellstart](#schnellstart)
-6. [Detaillierte Verwendung](#detaillierte-verwendung)
-7. [Modell-Architektur](#modell-architektur)
-8. [Feature-Extraktion](#feature-extraktion)
-9. [Training-Strategie](#training-strategie)
-10. [Performance-Metriken](#performance-metriken)
-11. [Literaturverweise](#literaturverweise)
+5. [Arbeiten direkt im Browser (GitHub)](#arbeiten-direkt-im-browser-github)
+6. [Schnellstart](#schnellstart)
+7. [Detaillierte Verwendung](#detaillierte-verwendung)
+8. [Modell-Architektur](#modell-architektur)
+9. [Feature-Extraktion](#feature-extraktion)
+10. [Training-Strategie](#training-strategie)
+11. [Performance-Metriken](#performance-metriken)
+12. [Literaturverweise](#literaturverweise)
 
 ---
 
@@ -260,70 +261,108 @@ spt_classifier_complete/
 
 ---
 
+<a id="arbeiten-direkt-im-browser-github"></a>
+## 🌐 ARBEITEN DIREKT IM BROWSER (GITHUB)
+
+Auch ohne lokale Installation kannst du Git-Befehle ausführen und Trainingsläufe starten. Wähle einfach eine der folgenden Optionen:
+
+### Option A – GitHub Codespaces (Browser-IDE mit Terminal)
+1. Öffne dein Repository auf **github.com**.
+2. Klicke auf **`<> Code`** und wähle den Tab **Codespaces**.
+3. Erstelle einen Codespace über **„Create codespace on …“** – eine VS-Code-ähnliche Umgebung erscheint im Browser.
+4. Öffne dort das Terminal (`Ctrl+J`) und führe alle Befehle wie gewohnt aus:
+   ```bash
+   git status
+   git add <dateien>
+   git commit -m "Meine Änderungen"
+   git push origin <branch>
+   ```
+5. Nach dem Push sind die Dateien direkt im GitHub-Repo; im Codespace kannst du auch `python spt_training_app.py` starten.
+
+### Option B – github.dev (Schnellzugriff per `.`)
+1. Drücke auf der Repo-Seite die Taste `.` (Punkt), um den github.dev-Editor zu öffnen.
+2. Wähle unten rechts **„Continue in Codespaces“**, um ein Terminal zu erhalten. (github.dev allein stellt kein Terminal bereit.)
+
+### Option C – GitHub Desktop (lokal ohne Terminaltippen)
+1. Installiere [GitHub Desktop](https://desktop.github.com/) auf Windows oder macOS.
+2. Nutze im Browser **`<> Code` → Open with GitHub Desktop`**.
+3. GitHub Desktop klont das Repo und bietet Buttons für Commit & Push; anschließend kannst du lokal `python spt_training_app.py` ausführen.
+
+---
+
 ## 🚀 SCHNELLSTART
 
-### 1. Minimales Beispiel (Python-Skript)
+### 1. Python One-Click Training
 
 ```python
-from train_spt_classifier import run_complete_training
+from train_spt_classifier import SPTClassifierTrainer, TrainingConfig
 
-# Training ausführen (ca. 30-60 Minuten)
-trainer = run_complete_training(
-    n_samples_per_class=3000,  # 3000 Samples pro Klasse
-    dimensionality='2D',       # 2D oder 3D
-    polymerization_degree=0.5, # 0.0-1.0
-    epochs=100,                # Max Epochen
-    batch_size=32,             # Batch Size
-    output_dir='./spt_trained_model'
+trainer = SPTClassifierTrainer(max_length=400, output_dir="./runs")
+config = TrainingConfig(
+    n_samples_per_class=250,
+    mode="both",
+    ratio_3d=0.35,
+    polymerization_degree=0.5,
+    epochs=30,
+    batch_size=128,
 )
+artifacts_dir = trainer.run_complete_training(config)
+print(f"Fertige Artefakte: {artifacts_dir}")
 ```
 
-### 2. Jupyter Notebook
+*Laufzeit:* Mit den Defaults dauert ein kompletter Trainingslauf auf einer modernen CPU rund 8–12 Minuten; mit GPU und Mixed
+Precision reduziert sich die Zeit auf unter zwei Minuten.
+
+### 2. Jupyter Notebook Flow
 
 ```python
-# Importiere Haupt-Klasse
-from train_spt_classifier import SPTClassifierTrainer
+from train_spt_classifier import SPTClassifierTrainer, TrainingConfig
 
-# Initialisiere Trainer
-trainer = SPTClassifierTrainer(
-    max_length=3000,
-    n_features=24,
-    output_dir='./mein_modell'
-)
-
-# Schritt 1: Daten generieren
-trainer.generate_training_data(
-    n_samples_per_class=3000,
-    dimensionality='2D',
-    polymerization_degree=0.5
-)
-
-# Schritt 2: Modell bauen
+trainer = SPTClassifierTrainer(max_length=400, output_dir="./notebook_run")
+trainer.generate_training_data(TrainingConfig(n_samples_per_class=200, mode="both", ratio_3d=0.4))
 trainer.build_model()
-
-# Schritt 3: Training
-trainer.train(epochs=100, batch_size=32)
-
-# Schritt 4: Evaluation
+trainer.train(epochs=40, batch_size=128)
 trainer.evaluate()
-
-# Schritt 5: Speichern
 trainer.save_model()
 ```
 
-### 3. Ausgabe-Dateien
+### 3. GUI-Anwendung
 
-Nach dem Training werden folgende Dateien erstellt:
+```bash
+python spt_training_app.py
+```
+
+Highlights der überarbeiteten Oberfläche:
+
+- Schnellstart-Preset für 2D/3D-Mischungen, inklusive automatischer Daten-Cache-Datei
+- Live-Plot für Trainings- und Validierungsgenauigkeit mit epochengenauer Aktualisierung
+- Strukturiertes Log aller Pipeline-Schritte (Datengenerierung → Modellbau → Training → Evaluation → Speichern)
+
+### 4. Ausgabe-Dateien
 
 ```
-spt_trained_model/
-├── spt_classifier.keras       # Trainiertes Modell (Keras-Format)
-├── feature_scaler.pkl         # StandardScaler für Features
-├── feature_names.pkl          # Namen der 24 Features
-├── metadata.json              # Modell-Konfiguration
-├── training_history.pkl       # Loss/Accuracy pro Epoche
-├── training_history.png       # Training Plots
-└── confusion_matrix.png       # Confusion Matrix auf Test-Set
+run_YYYYmmdd-HHMMSS/
+├── model.keras            # Trainiertes Modell (Keras-Format)
+├── feature_scaler.pkl     # StandardScaler für Features
+├── feature_names.json     # Namen der 24 Features
+├── class_names.json       # Label-Mapping
+├── history.json           # Loss/Accuracy pro Epoche
+└── metadata.json          # Datensatz- & Trainingsparameter
+```
+
+### 5. Trainiertes Modell wiederverwenden
+
+```bash
+python spt_inference.py --artifacts runs/run_20240101-120000 --npz neue_tracks.npz --output predictions.json
+```
+
+Oder direkt im Python-Code:
+
+```python
+from train_spt_classifier import SPTClassifierTrainer
+
+trainer = SPTClassifierTrainer.from_artifacts("runs/run_20240101-120000")
+labels, probabilities = trainer.predict_trajectories(list_of_trajectories)
 ```
 
 ---

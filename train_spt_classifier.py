@@ -1,1123 +1,626 @@
-﻿# -*- coding: utf-8 -*-
+"""Fast end-to-end training pipeline for SPT diffusion classification.
+
+This module provides the :class:`SPTClassifierTrainer` which orchestrates
+synthetic trajectory generation, physics inspired feature extraction, model
+training and persistence.  The goal of the redesign is twofold:
+
+* **Extremely fast feedback** – the defaults are tuned for sub-minute
+  experiments on a laptop CPU while still scaling to larger datasets on a GPU.
+* **Excellent accuracy** – a light-weight but expressive hybrid network that
+  fuses trajectory and feature representations, combined with stratified
+  splits, class rebalancing and advanced regularisation.
+
+The trainer exposes simple one-click orchestration for the GUI application and
+can also be scripted programmatically.  Artifacts (Keras model, scaler,
+feature names, label map, history and metadata) are persisted in a single
+output directory so that the model can be reloaded for later evaluation.
 """
-SPT CLASSIFIER - KOMPLETTES TRAINING SYSTEM
-============================================
+from __future__ import annotations
 
-Wissenschaftlich fundiertes End-to-End Training System fÃ¼r Single-Particle-Tracking 
-Diffusionsklassifikation mit Deep Learning.
-
-ARCHITEKTUR: Hybrid CNN-LSTM mit Multi-Head Attention
-- 1D Convolutional Layers (lokale Muster)
-- Bidirectional LSTM (temporale AbhÃ¤ngigkeiten)
-- Multi-Head Self-Attention (wichtige Zeitpunkte)
-- Feature Branch (24 physikalische Features)
-
-WISSENSCHAFTLICHE BASIS:
-- Granik & Weiss (2019): Deep Learning fÃ¼r SPT-Klassifikation
-- Hochreiter & Schmidhuber (1997): LSTM fÃ¼r Sequenzverarbeitung
-- Vaswani et al. (2017): Attention Mechanisms
-
-Autor: Masterthesis TDI-G0 Diffusion in Polymeren
-Version: 2.0 - VollstÃ¤ndig korrigiert und integriert
-Oktober 2025
-"""
+import json
+import pickle
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
-import matplotlib.pyplot as plt
-import os
-import pickle
-from datetime import datetime
-import warnings
-warnings.filterwarnings('ignore')
-
-# TensorFlow/Keras Imports
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers, models
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-from tensorflow.keras.regularizers import l2
+from tensorflow.keras import layers
 
-# Sklearn Imports
+from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 
-# Lokale Module
-from spt_trajectory_generator import generate_spt_dataset, PolymerDiffusionParameters
 from spt_feature_extractor import SPTFeatureExtractor
+from spt_trajectory_generator import generate_spt_dataset
 
-print("="*80)
-print("SPT DEEP LEARNING CLASSIFIER - TRAINING SYSTEM")
-print("="*80)
-print(f"TensorFlow Version: {tf.__version__}")
-print(f"Keras Version: {keras.__version__}")
-print("="*80 + "\n")
+ArrayLike = np.ndarray
+
+
+@dataclass
+class TrainingConfig:
+    """Container describing how a dataset should be generated and trained."""
+
+    n_samples_per_class: int = 400
+    mode: str = "both"  # "2d", "3d" or "both"
+    ratio_3d: float = 0.4
+    polymerization_degree: float = 0.5
+    epochs: int = 40
+    batch_size: int = 128
+    cache_path: Optional[Path] = None
+
+    def canonical_mode(self) -> str:
+        mode = self.mode.strip().lower()
+        if mode not in {"2d", "3d", "both"}:
+            raise ValueError("mode must be '2D', '3D' or 'both'")
+        return mode
+
+
+@dataclass
+class DatasetBundle:
+    """Holds the padded trajectory tensors and scaled feature matrices."""
+
+    X_traj_train: ArrayLike
+    X_traj_val: ArrayLike
+    X_traj_test: ArrayLike
+    X_feat_train: ArrayLike
+    X_feat_val: ArrayLike
+    X_feat_test: ArrayLike
+    y_train: ArrayLike
+    y_val: ArrayLike
+    y_test: ArrayLike
+    lengths: ArrayLike
+    class_names: List[str]
+    metadata: Dict[str, float] = field(default_factory=dict)
+
+
+class EpochProgressCallback(keras.callbacks.Callback):
+    """Keras callback that forwards epoch end statistics to the GUI."""
+
+    def __init__(self, total_epochs: int, sink: Optional[Callable[[int, Dict[str, float], int], None]] = None):
+        super().__init__()
+        self.total_epochs = int(total_epochs)
+        self.sink = sink
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None) -> None:  # noqa: D401
+        if self.sink is not None:
+            self.sink(epoch, dict(logs or {}), self.total_epochs)
 
 
 class SPTClassifierTrainer:
-    """
-    VollstÃ¤ndiges Training System fÃ¼r SPT-Klassifikation
-    
-    Integriert:
-    -----------
-    1. Datengenerierung (physikalisch korrekte synthetische Trajektorien)
-    2. Feature-Extraktion (24 wissenschaftliche Features)
-    3. Deep Learning Architektur (Hybrid CNN-LSTM-Attention)
-    4. Training mit Best Practices (Early Stopping, LR Scheduling)
-    5. Evaluation & Visualisierung
-    6. Model Persistence
-    
-    Theoretische Fundierung:
-    -------------------------
-    Die Architektur kombiniert:
-    - **Convolutional Layers**: Erfassen lokale Muster in Trajektorien
-      (z.B. kurzfristige subdiffusive Phasen)
-    - **LSTM**: Modelliert langreichweitige temporale AbhÃ¤ngigkeiten
-      und verarbeitet variable Trajektorien-LÃ¤ngen
-    - **Attention**: Identifiziert informative Abschnitte der Trajektorie
-    - **Feature Branch**: Inkorporiert physikalisches DomÃ¤nenwissen
-      (Physics-informed Machine Learning)
-    """
-    
+    """Fast hybrid CNN-BiLSTM-attention classifier for SPT trajectories."""
+
     def __init__(
         self,
-        max_length: int = 500,
-        output_dir: str = './spt_trained_model',
-        random_seed: int = 42
-    ):
-        """
-        Args:
-            max_length: Maximale Trajektorien-LÃ¤nge fÃ¼r Padding
-            n_features: Anzahl extrahierter Features (24)
-            output_dir: Ausgabe-Verzeichnis fÃ¼r trainiertes Modell
-            random_seed: Random Seed fÃ¼r Reproduzierbarkeit
-        """
-        self.max_length = max_length
-        self.n_features = None
-        self.output_dir = output_dir
-        self.random_seed = random_seed
-        
-        # Erstelle Output-Verzeichnis
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Set Random Seeds
-        np.random.seed(random_seed)
-        tf.random.set_seed(random_seed)
-        
-        # Komponenten
-        self.feature_extractor = SPTFeatureExtractor(dt=0.01)
+        max_length: int = 400,
+        output_dir: str | Path = "./spt_trained_model",
+        random_seed: int = 42,
+        enable_mixed_precision: bool = True,
+    ) -> None:
+        self.max_length = int(max_length)
+        self.random_seed = int(random_seed)
+        self.output_dir = Path(output_dir).expanduser().resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self._set_random_seeds(self.random_seed)
+        self.mixed_precision = False
+        if enable_mixed_precision and tf.config.list_physical_devices("GPU"):
+            try:
+                from tensorflow.keras import mixed_precision
+
+                mixed_precision.set_global_policy("mixed_float16")
+                self.mixed_precision = True
+            except Exception:  # pragma: no cover - defensive, mixed precision optional
+                self.mixed_precision = False
+
+        self.feature_extractor = SPTFeatureExtractor(dt=0.1)
         self.scaler = StandardScaler()
-        self.model = None
-        self.history = None
-        
-        # Daten
-        self.X_traj_train = None
-        self.X_feat_train = None
-        self.y_train = None
-        self.X_traj_val = None
-        self.X_feat_val = None
-        self.y_val = None
-        self.X_traj_test = None
-        self.X_feat_test = None
-        self.y_test = None
-        self.class_names = ['Normal', 'Subdiffusion', 'Superdiffusion', 'Confined']
-        # Einheitliche Eingabe-Dimension: 3 (2D wird mit z=0 aufgefÃ¼llt)
-        self.input_dim = 3
-    
+
+        self.dataset: Optional[DatasetBundle] = None
+        self.model: Optional[keras.Model] = None
+        self.history: Optional[keras.callbacks.History] = None
+        self.class_weights: Optional[Dict[int, float]] = None
+        self.class_names: List[str] = ["Normal", "Subdiffusion", "Superdiffusion", "Confined"]
+
+    # ------------------------------------------------------------------
+    # Dataset generation and preprocessing
+    # ------------------------------------------------------------------
     def generate_training_data(
         self,
-        n_samples_per_class: int = 10000,
-        mode: str = 'both',
-        ratio_3d: float = 0.5,
-        polymerization_degree: float = 0.5,
-        verbose: bool = True
-    ):
-        """
-        Generiere wissenschaftlich fundierte Trainingsdaten
-        
-        Args:
-            n_samples_per_class: Anzahl Samples pro Klasse
-            mode: '2D', '3D' oder 'both'
-            ratio_3d: Anteil 3D-Samples bei 'both' (0..1)
-            polymerization_degree: 0.0-1.0 (Eduktschmelze bis vollpolymerisiert)
-            verbose: Ausgabe?
-            
-        Wissenschaftliche Basis:
-        ------------------------
-        Die Datengenerierung basiert auf physikalisch korrekten Modellen:
-        
-        1. **Normale Diffusion**: Einstein-Smoluchowski Gleichung
-           MSD(t) = 2dÂ·DÂ·t (d=DimensionalitÃ¤t)
-           
-        2. **Anomale Diffusion**: Generalisierte Diffusionsgleichung
-           MSD(t) = 2dÂ·D_Î±Â·t^Î±
-           - Î± < 1: Subdiffusion (Polymer-KÃ¤fige, Crowding)
-           - Î± > 1: Superdiffusion (aktive Prozesse, Konvektion)
-           
-        3. **Confined Diffusion**: Harmonisches Potential
-           Reflektive Randbedingungen in sphÃ¤rischer/zylindrischer Geometrie
-           
-        4. **Lokalisierungs-PrÃ¤zision**: GauÃŸsches Rauschen
-           Ïƒ_loc â‰ˆ 15 nm (typisch fÃ¼r TIRF-Mikroskopie)
-        """
-        if verbose:
-            print("\n" + "="*80)
-            print("DATENGENERIERUNG")
-            print("="*80)
-            print(f"DimensionalitÃ¤t: {dimensionality}")
-            print(f"Samples pro Klasse: {n_samples_per_class}")
-            print(f"Polymerisationsgrad: {polymerization_degree:.1%}")
-            D_min, D_max = PolymerDiffusionParameters.get_D_range(polymerization_degree)
-            print(f"Diffusionskoeffizient-Bereich: {D_min:.2e} - {D_max:.2e} ÂµmÂ²/s")
-            print("="*80 + "\n")
-        
-        # Generiere Dataset
-        X_traj_list, y, lengths, class_names = generate_spt_dataset(
+        config: TrainingConfig | None = None,
+        *,
+        n_samples_per_class: Optional[int] = None,
+        mode: Optional[str] = None,
+        ratio_3d: Optional[float] = None,
+        polymerization_degree: Optional[float] = None,
+        verbose: bool = True,
+        reuse_cache: bool = True,
+    ) -> None:
+        """Create synthetic trajectories, extract features and split the data."""
+
+        config = self._resolve_config(
+            config,
             n_samples_per_class=n_samples_per_class,
-            min_length=50,
-            max_length=self.max_length,
-            dimensionality=dimensionality,
+            mode=mode,
+            ratio_3d=ratio_3d,
             polymerization_degree=polymerization_degree,
-            dt=0.01,
-            localization_precision=0.015,
-            boost_classes=None,
-            verbose=verbose
         )
-        
-        self.class_names = class_names
-        
+
+        cache_path = config.cache_path or (self.output_dir / "cached_dataset.npz")
+        if reuse_cache and cache_path.is_file():
+            if verbose:
+                print(f"Loading cached dataset from {cache_path}")
+            bundle = self._load_cached_dataset(cache_path)
+        else:
+            if verbose:
+                print("Generating synthetic trajectories …")
+            bundle = self._create_dataset(config, verbose=verbose)
+            if cache_path:
+                self._store_cached_dataset(cache_path, bundle)
+
+        self.dataset = bundle
+        self.class_names = bundle.class_names
+        self.class_weights = self._compute_class_weights(bundle.y_train)
+
         if verbose:
-            print(f"\nâœ… {len(X_traj_list)} Trajektorien generiert")
-            print(f"   Klassen: {class_names}")
-            print(f"   LÃ¤ngen: {lengths.min()}-{lengths.max()} Frames")
-        
-        # Feature-Extraktion
-        if verbose:
-            print("\n" + "="*80)
-            print("FEATURE-EXTRAKTION")
-            print("="*80)
-            print("Extrahiere 24 wissenschaftliche Features:")
-            print("  â€¢ MSD-basiert (Î±, D_eff, LinearitÃ¤t)")
-            print("  â€¢ Geometrisch (Gyration, Asphericity, Straightness)")
-            print("  â€¢ Statistisch (Gaussianity, Kurtosis, Skewness)")
-            print("  â€¢ Temporal (Velocity Autocorrelation)")
-            print("  â€¢ Confinement (Trappedness, Radius Ratio)")
-            print("="*80 + "\n")
-        
-        X_feat = self.feature_extractor.extract_batch(X_traj_list)
-        
-        self.n_features = X_feat.shape[1]
-        if verbose:
-            print(f"\nâœ… Feature-Matrix: {X_feat.shape}")
-            print(f"   Features pro Sample: {X_feat.shape[1]}")
-        
-        # Padding der Trajektorien
-        if verbose:
-            print("\n" + "="*80)
-            print("TRAJEKTORIEN-PADDING")
-            print("="*80)
-            print(f"Padding auf max_length = {self.max_length} Frames")
-            print("="*80 + "\n")
-        
-        n_samples = len(X_traj_list)
-        X_traj_padded = np.zeros((n_samples, self.max_length, self.input_dim), dtype=np.float32)
-        
-        for i, traj in enumerate(X_traj_list):
-            L = len(traj)
-            if L > self.max_length:
-                start = np.random.randint(0, L - self.max_length + 1)
-                segment = traj[start:start + self.max_length]
-                X_traj_padded[i, :, :] = segment.astype(np.float32)
-            else:
-                length = L
-                X_traj_padded[i, :length, :] = traj[:length].astype(np.float32)
-        
-        if verbose:
-            print(f"âœ… Padded Trajektorien: {X_traj_padded.shape}")
-        
-        # Train-Val-Test Split (stratifiziert)
-        if verbose:
-            print("\n" + "="*80)
-            print("TRAIN-VAL-TEST SPLIT")
-            print("="*80)
-            print("Stratifiziert nach Klasse (erhÃ¤lt Klassenverteilung)")
-            print("="*80 + "\n")
-        
-        # Erst Test-Set abtrennen (15%)
-        X_traj_temp, X_traj_test, X_feat_temp, X_feat_test, y_temp, y_test = train_test_split(
-            X_traj_padded, X_feat, y,
-            test_size=0.15,
-            stratify=y,
-            random_state=self.random_seed
-        )
-        
-        # Dann Val-Set von Rest (15% von 85% = ~13%)
-        X_traj_train, X_traj_val, X_feat_train, X_feat_val, y_train, y_val = train_test_split(
-            X_traj_temp, X_feat_temp, y_temp,
-            test_size=0.176,  # 15/85 = 0.176
-            stratify=y_temp,
-            random_state=self.random_seed
-        )
-        
-        if verbose:
-            print(f"Train-Set: {len(X_traj_train)} samples ({len(X_traj_train)/len(X_traj_padded)*100:.1f}%)")
-            print(f"Val-Set:   {len(X_traj_val)} samples ({len(X_traj_val)/len(X_traj_padded)*100:.1f}%)")
-            print(f"Test-Set:  {len(X_traj_test)} samples ({len(X_traj_test)/len(X_traj_padded)*100:.1f}%)")
-        
-        # Feature-Standardisierung (nur auf Train-Set fitten!)
-        if verbose:
-            print("\n" + "="*80)
-            print("FEATURE-STANDARDISIERUNG")
-            print("="*80)
-            print("Z-Score Normalisierung: (x - Î¼) / Ïƒ")
-            print("Scaler wird nur auf Train-Set gefittet!")
-            print("="*80 + "\n")
-        
-        X_feat_train = self.scaler.fit_transform(X_feat_train)
-        X_feat_val = self.scaler.transform(X_feat_val)
-        X_feat_test = self.scaler.transform(X_feat_test)
-        
-        if verbose:
-            print("âœ… Features standardisiert")
-            print(f"   Train Mean: {np.mean(X_feat_train):.4f}, Std: {np.std(X_feat_train):.4f}")
-            print(f"   Val Mean:   {np.mean(X_feat_val):.4f}, Std: {np.std(X_feat_val):.4f}")
-        
-        # Speichern
-        self.X_traj_train = X_traj_train
-        self.X_feat_train = X_feat_train
-        self.y_train = y_train
-        self.X_traj_val = X_traj_val
-        self.X_feat_val = X_feat_val
-        self.y_val = y_val
-        self.X_traj_test = X_traj_test
-        self.X_feat_test = X_feat_test
-        self.y_test = y_test
-        
-        if verbose:
-            print("\nâœ… Daten erfolgreich vorbereitet!")
-    
-    def build_model(self, verbose: bool = True):
-        """
-        Konstruiere Hybrid CNN-LSTM-Attention Architektur
-        
-        Architektur-Design:
-        -------------------
-        
-        TRAJECTORY BRANCH (Rohdaten):
-        Input â†’ Masking â†’ Conv1D Blocks â†’ BiLSTM â†’ Attention â†’ GAP â†’ Dropout
-        
-        FEATURE BRANCH (24 physikalische Features):
-        Input â†’ Dense(128) â†’ BN â†’ ReLU â†’ Dense(64) â†’ BN â†’ ReLU â†’ Dropout
-        
-        FUSION & CLASSIFICATION:
-        Concat(Traj, Feat) â†’ Dense(256) â†’ Dense(128) â†’ Output(4, softmax)
-        
-        Mathematische Details:
-        ----------------------
-        
-        1. **Conv1D**: Lokale Musterextraktion
-           y[n] = Ïƒ(Î£_k w[k]Â·x[n-k] + b)
-           Filter: [64, 128, 256], Kernel: [7, 5, 3]
-        
-        2. **Bidirectional LSTM**: Temporale Sequenzmodellierung
-           h_t = LSTM_forward(x_t, h_{t-1})
-           h'_t = LSTM_backward(x_t, h'_{t+1})
-           output_t = [h_t, h'_t]
-        
-        3. **Multi-Head Attention**: Wichtige Zeitpunkte identifizieren
-           Attention(Q,K,V) = softmax(QK^T / âˆšd_k)Â·V
-           Heads: 4
-        
-        4. **Regularisierung**:
-           - Batch Normalization (reduziert Internal Covariate Shift)
-           - Dropout: p=0.3 (verhindert Co-Adaptation)
-           - L2 Weight Decay: Î»=1e-4
-        """
-        if verbose:
-            print("\n" + "="*80)
-            print("MODELL-KONSTRUKTION")
-            print("="*80)
-            print("Hybrid Architecture: CNN + BiLSTM + Attention + Features")
-            print("="*80 + "\n")
-        
-        # === TRAJECTORY BRANCH ===
-        traj_input = layers.Input(
-            shape=(self.max_length, self.input_dim),
-            name='trajectory_input'
-        )
-        
-        # Masking (ignoriert gepaddete Nullen)
-        x_traj = layers.Masking(mask_value=0.0, name='masking')(traj_input)
-        
-        # Conv1D Blocks
-        conv_filters = [64, 128, 256]
-        conv_kernels = [7, 5, 3]
-        
-        for i, (filters, kernel) in enumerate(zip(conv_filters, conv_kernels)):
-            x_traj = layers.Conv1D(
-                filters=filters,
-                kernel_size=kernel,
-                padding='same',
-                kernel_regularizer=l2(1e-4),
-                name=f'conv1d_{i+1}'
-            )(x_traj)
-            x_traj = layers.BatchNormalization(name=f'bn_conv_{i+1}')(x_traj)
-            x_traj = layers.Activation('relu', name=f'relu_conv_{i+1}')(x_traj)
-            
-            if i < 2:  # MaxPooling nach ersten beiden Blocks
-                x_traj = layers.MaxPooling1D(pool_size=2, name=f'pool_{i+1}')(x_traj)
-        
-        # Bidirectional LSTM
-        x_traj = layers.Bidirectional(
-            layers.LSTM(128, return_sequences=True, kernel_regularizer=l2(1e-4)),
-            name='bilstm'
-        )(x_traj)
-        
-        # Multi-Head Self-Attention
-        attention_out = layers.MultiHeadAttention(
-            num_heads=4,
-            key_dim=128,
-            name='attention'
-        )(x_traj, x_traj)
-        
-        # Residual + LayerNorm
-        x_traj = layers.Add(name='attention_residual')([x_traj, attention_out])
-        x_traj = layers.LayerNormalization(name='attention_norm')(x_traj)
-        
-        # Global Average Pooling
-        x_traj = layers.GlobalAveragePooling1D(name='gap')(x_traj)
-        x_traj = layers.Dropout(0.3, name='traj_dropout')(x_traj)
-        
-        # === FEATURE BRANCH ===
-        feat_input = layers.Input(shape=(self.n_features,), name='feature_input')
-        
-        x_feat = layers.Dense(128, kernel_regularizer=l2(1e-4), name='feat_dense1')(feat_input)
-        x_feat = layers.BatchNormalization(name='bn_feat1')(x_feat)
-        x_feat = layers.Activation('relu', name='relu_feat1')(x_feat)
-        
-        x_feat = layers.Dense(64, kernel_regularizer=l2(1e-4), name='feat_dense2')(x_feat)
-        x_feat = layers.BatchNormalization(name='bn_feat2')(x_feat)
-        x_feat = layers.Activation('relu', name='relu_feat2')(x_feat)
-        
-        x_feat = layers.Dropout(0.3, name='feat_dropout')(x_feat)
-        
-        # === FUSION ===
-        merged = layers.Concatenate(name='fusion')([x_traj, x_feat])
-        
-        # Classification Head
-        x = layers.Dense(256, activation='relu', kernel_regularizer=l2(1e-4), name='fusion_dense1')(merged)
-        x = layers.BatchNormalization(name='bn_fusion1')(x)
-        x = layers.Dropout(0.4, name='fusion_dropout1')(x)
-        
-        x = layers.Dense(128, activation='relu', kernel_regularizer=l2(1e-4), name='fusion_dense2')(x)
-        x = layers.BatchNormalization(name='bn_fusion2')(x)
-        x = layers.Dropout(0.4, name='fusion_dropout2')(x)
-        
-        # Output Layer
-        outputs = layers.Dense(4, activation='softmax', name='output')(x)
-        
-        # Build Model
-        model = models.Model(
-            inputs=[traj_input, feat_input],
-            outputs=outputs,
-            name='SPT_Hybrid_Classifier'
-        )
-        
-        # Compile
-        optimizer = keras.optimizers.Adam(learning_rate=1e-3)
+            print(
+                f"Dataset ready: train={bundle.X_traj_train.shape[0]}, "
+                f"val={bundle.X_traj_val.shape[0]}, test={bundle.X_traj_test.shape[0]}"
+            )
+
+    # ------------------------------------------------------------------
+    # Model building and training
+    # ------------------------------------------------------------------
+    def build_model(self, *, learning_rate: float = 1e-3, verbose: bool = True) -> keras.Model:
+        """Construct the dual-branch neural network."""
+
+        if self.dataset is None:
+            raise RuntimeError("Call generate_training_data() before build_model().")
+
+        n_features = self.dataset.X_feat_train.shape[1]
+        traj_input = keras.Input(shape=(self.max_length, 3), name="trajectory")
+        x = layers.Masking(mask_value=0.0)(traj_input)
+        x = layers.SeparableConv1D(64, 5, padding="same", activation="swish")(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.SeparableConv1D(64, 5, padding="same", activation="swish")(x)
+        x = layers.MaxPooling1D(2)(x)
+        x = layers.Dropout(0.15)(x)
+        x = layers.Bidirectional(layers.LSTM(64, return_sequences=True, dropout=0.15))(x)
+        attention = layers.MultiHeadAttention(num_heads=4, key_dim=32, dropout=0.1)
+        x = attention(x, x)
+        x = layers.GlobalAveragePooling1D()(x)
+
+        feat_input = keras.Input(shape=(n_features,), name="features")
+        y = layers.BatchNormalization()(feat_input)
+        y = layers.Dense(96, activation="swish")(y)
+        y = layers.Dropout(0.2)(y)
+
+        combined = layers.Concatenate()([x, y])
+        combined = layers.BatchNormalization()(combined)
+        combined = layers.Dense(128, activation="swish", kernel_regularizer=keras.regularizers.l2(1e-5))(combined)
+        combined = layers.Dropout(0.25)(combined)
+
+        output = layers.Dense(len(self.class_names), activation="softmax", dtype="float32")(combined)
+
+        model = keras.Model(inputs=[traj_input, feat_input], outputs=output, name="spt_classifier")
+        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
         model.compile(
             optimizer=optimizer,
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
+            loss="categorical_crossentropy",
+            metrics=["accuracy"],
         )
-        
+
         self.model = model
-        
         if verbose:
-            print("âœ… Modell konstruiert und kompiliert")
-            print(f"\nParameter: {model.count_params():,}")
-            print("\nModel Summary:")
             model.summary()
-    
-    def generate_training_data_both(
+        return model
+
+    def train(
         self,
-        n_samples_per_class: int = 1000,
-        ratio_3d: float = 0.5,
-        polymerization_degree: float = 0.5,
-        verbose: bool = True
-    ):
-        """Generate new trajectories for the weakest class and add them to the training set.\n        - target_class_index: 0=Normal, 1=Subdiffusion, 2=Superdiffusion, 3=Confined\n        - n_new: number of new samples across 2D+3D\n        - ratio_3d: share of 3D (0..1). Rest is 2D.\n        """
+        *,
+        epochs: int = 40,
+        batch_size: int = 128,
+        verbose: int = 1,
+        epoch_callback: Optional[Callable[[int, Dict[str, float], int], None]] = None,
+    ) -> keras.callbacks.History:
+        """Train the model using tf.data pipelines for maximum speed."""
+
+        if self.dataset is None or self.model is None:
+            raise RuntimeError("Dataset and model must be prepared before training.")
+
+        train_ds = self._make_dataset(
+            self.dataset.X_traj_train,
+            self.dataset.X_feat_train,
+            self.dataset.y_train,
+            batch_size,
+            shuffle=True,
+        )
+        val_ds = self._make_dataset(
+            self.dataset.X_traj_val,
+            self.dataset.X_feat_val,
+            self.dataset.y_val,
+            batch_size,
+            shuffle=False,
+        )
+
+        callbacks = self._build_callbacks(epochs)
+        if epoch_callback is not None:
+            callbacks.append(EpochProgressCallback(epochs, epoch_callback))
+
+        history = self.model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=epochs,
+            verbose=verbose,
+            callbacks=callbacks,
+            class_weight=self.class_weights,
+        )
+
+        self.history = history
+        return history
+
+    # ------------------------------------------------------------------
+    # Evaluation and persistence
+    # ------------------------------------------------------------------
+    def evaluate(self, *, verbose: bool = True) -> Tuple[float, Dict[str, Dict[str, float]], np.ndarray]:
+        """Evaluate the model on the held-out test set."""
+
+        if self.dataset is None or self.model is None:
+            raise RuntimeError("Nothing to evaluate – run generate_training_data() and build_model() first.")
+
+        test_ds = self._make_dataset(
+            self.dataset.X_traj_test,
+            self.dataset.X_feat_test,
+            self.dataset.y_test,
+            batch_size=256,
+            shuffle=False,
+        )
+        loss, accuracy = self.model.evaluate(test_ds, verbose=0)
+
+        y_pred_prob = self.model.predict(test_ds, verbose=0)
+        y_pred = y_pred_prob.argmax(axis=1)
+        report = classification_report(
+            self.dataset.y_test,
+            y_pred,
+            target_names=self.class_names,
+            output_dict=True,
+            zero_division=0,
+        )
+        matrix = confusion_matrix(self.dataset.y_test, y_pred)
+
         if verbose:
-            print("\n" + "="*80)
-            print("DATENGENERIERUNG (2D+3D)")
-            print("="*80)
-            print(f"Samples pro Klasse: {n_samples_per_class}")
-            print(f"Anteil 3D: {ratio_3d:.0%}")
-            print(f"Polymerisationsgrad: {polymerization_degree:.1%}")
-            print("="*80 + "\n")
+            print(json.dumps(report, indent=2))
+            print("Confusion matrix:\n", matrix)
+            print(f"Test accuracy: {accuracy:.4f}")
 
-        n_3d = int(round(n_samples_per_class * ratio_3d))
-        n_2d = n_samples_per_class - n_3d
+        return accuracy, report, matrix
 
-        X2, y2, l2, _ = generate_spt_dataset(
-            n_samples_per_class=n_2d,
-            min_length=50,
-            max_length=self.max_length,
-            dimensionality='2D',
-            polymerization_degree=polymerization_degree,
-            dt=0.01,
-            localization_precision=0.015,
-            boost_classes=None,
-            verbose=verbose
-        )
-        X3, y3, l3, _ = generate_spt_dataset(
-            n_samples_per_class=n_3d,
-            min_length=50,
-            max_length=self.max_length,
-            dimensionality='3D',
-            polymerization_degree=polymerization_degree,
-            dt=0.01,
-            localization_precision=0.015,
-            boost_classes=None,
-            verbose=verbose
-        )
+    def predict_trajectories(self, trajectories: Iterable[np.ndarray]) -> Tuple[List[str], np.ndarray]:
+        """Classify arbitrary trajectories using the trained model."""
 
-        X_traj_list = X2 + X3
-        y = np.concatenate([y2, y3])
-        lengths = np.concatenate([l2, l3])
-        self.class_names = ['Normal', 'Subdiffusion', 'Superdiffusion', 'Confined']
+        if self.model is None:
+            raise RuntimeError("Model not loaded. Call from_artifacts() or train a model first.")
 
-        idx = np.arange(len(y))
-        rng = np.random.default_rng(self.random_seed)
-        rng.shuffle(idx)
-        X_traj_list = [X_traj_list[i] for i in idx]
-        y = y[idx]
-        lengths = lengths[idx]
+        trajectories = list(trajectories)
+        if not trajectories:
+            return [], np.empty((0, len(self.class_names)))
+
+        traj_tensor = self._pad_and_normalise(trajectories)
+        features = self.feature_extractor.extract_batch(trajectories)
+        features = self.scaler.transform(features).astype(np.float32)
+
+        probs = self.model.predict([traj_tensor, features], verbose=0)
+        labels = [self.class_names[int(idx)] for idx in probs.argmax(axis=1)]
+        return labels, probs
+
+    def save_model(self, *, verbose: bool = True) -> Path:
+        """Persist the trained model and preprocessing artifacts."""
+
+        if self.model is None or self.dataset is None:
+            raise RuntimeError("Train a model before calling save_model().")
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target_dir = self.output_dir / f"run_{timestamp}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        model_path = target_dir / "model.keras"
+        self.model.save(model_path, include_optimizer=True)
+
+        scaler_path = target_dir / "feature_scaler.pkl"
+        with open(scaler_path, "wb") as f:
+            pickle.dump(self.scaler, f)
+
+        feature_path = target_dir / "feature_names.json"
+        with open(feature_path, "w", encoding="utf-8") as f:
+            json.dump(self.feature_extractor.feature_names, f, indent=2)
+
+        labels_path = target_dir / "class_names.json"
+        with open(labels_path, "w", encoding="utf-8") as f:
+            json.dump(self.class_names, f, indent=2)
+
+        history_path = target_dir / "history.json"
+        if self.history is not None:
+            with open(history_path, "w", encoding="utf-8") as f:
+                json.dump(self.history.history, f, indent=2)
+
+        dataset_meta = self.dataset.metadata | {
+            "max_length": self.max_length,
+            "input_channels": 3,
+            "class_weights": self.class_weights,
+        }
+        metadata_path = target_dir / "metadata.json"
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(dataset_meta, f, indent=2, default=_json_converter)
 
         if verbose:
-            print(f"-> {len(X_traj_list)} Trajektorien generiert")
-            print(f"   LÃ¤ngen: {int(lengths.min())}-{int(lengths.max())} Frames")
+            print(f"Artifacts saved to {target_dir}")
+
+        return target_dir
+
+    # ------------------------------------------------------------------
+    # Convenience orchestration
+    # ------------------------------------------------------------------
+    def run_complete_training(self, config: TrainingConfig, *, verbose: bool = True) -> Path:
+        """Convenience wrapper for command line and GUI one-click training."""
 
         if verbose:
-            print("\n" + "="*80)
-            print("FEATURE-EXTRAKTION")
-            print("="*80)
-        X_feat = self.feature_extractor.extract_batch(X_traj_list)
-        is_3d = np.array([1 if traj.shape[1] == 3 else 0 for traj in X_traj_list], dtype=float).reshape(-1, 1)
-        X_feat = np.concatenate([X_feat, is_3d], axis=1)
-        self.n_features = X_feat.shape[1]
+            print("=== SPT classifier one-click training ===")
+            print(asdict(config))
 
-        n_samples = len(X_traj_list)
-        X_traj_padded = np.zeros((n_samples, self.max_length, 3), dtype=np.float32)
-        for i, traj in enumerate(X_traj_list):
-            if traj.shape[1] == 2:
-                traj3 = np.zeros((len(traj), 3), dtype=traj.dtype)
-                traj3[:, :2] = traj
-            else:
-                traj3 = traj
-            L = len(traj3)
-            if L > self.max_length:
-                start = np.random.randint(0, L - self.max_length + 1)
-                segment = traj3[start:start + self.max_length]
-                X_traj_padded[i, :, :] = segment.astype(np.float32)
-            else:
-                length = L
-                X_traj_padded[i, :length, :] = traj3[:length].astype(np.float32)
+        self.generate_training_data(config=config, verbose=verbose)
+        self.build_model(verbose=verbose)
+        self.train(epochs=config.epochs, batch_size=config.batch_size, verbose=0 if verbose else 0)
+        self.evaluate(verbose=verbose)
+        return self.save_model(verbose=verbose)
 
-        X_traj_temp, X_traj_test, X_feat_temp, X_feat_test, y_temp, y_test = train_test_split(
-            X_traj_padded, X_feat, y, test_size=0.15, stratify=y, random_state=self.random_seed
+    # ------------------------------------------------------------------
+    # Loading previously trained models
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_artifacts(cls, directory: str | Path) -> "SPTClassifierTrainer":
+        """Restore a trainer with model and scaler for inference."""
+
+        directory = Path(directory)
+        metadata_file = directory / "metadata.json"
+        if not metadata_file.is_file():
+            raise FileNotFoundError(f"metadata.json missing in {directory}")
+        with open(metadata_file, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
+        trainer = cls(max_length=int(metadata.get("max_length", 400)), output_dir=directory)
+        trainer.class_names = metadata.get("class_names", trainer.class_names)
+
+        scaler_path = directory / "feature_scaler.pkl"
+        with open(scaler_path, "rb") as f:
+            trainer.scaler = pickle.load(f)
+
+        model_path = directory / "model.keras"
+        trainer.model = keras.models.load_model(model_path)
+
+        trainer.dataset = None
+        trainer.history = None
+        return trainer
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _resolve_config(
+        self,
+        config: Optional[TrainingConfig],
+        *,
+        n_samples_per_class: Optional[int],
+        mode: Optional[str],
+        ratio_3d: Optional[float],
+        polymerization_degree: Optional[float],
+    ) -> TrainingConfig:
+        if config is None:
+            config = TrainingConfig()
+        if n_samples_per_class is not None:
+            config.n_samples_per_class = int(n_samples_per_class)
+        if mode is not None:
+            config.mode = mode
+        if ratio_3d is not None:
+            config.ratio_3d = float(np.clip(ratio_3d, 0.0, 1.0))
+        if polymerization_degree is not None:
+            config.polymerization_degree = float(np.clip(polymerization_degree, 0.0, 1.0))
+        config.canonical_mode()  # validates mode
+        return config
+
+    def _create_dataset(self, config: TrainingConfig, *, verbose: bool) -> DatasetBundle:
+        plan = self._plan_generation(config)
+        all_traj: List[np.ndarray] = []
+        labels: List[int] = []
+        lengths: List[int] = []
+        class_names: List[str] | None = None
+
+        for dim_label, count in plan:
+            X_dim, y_dim, length_dim, class_names_dim = generate_spt_dataset(
+                n_samples_per_class=count,
+                min_length=80,
+                max_length=self.max_length,
+                dimensionality=dim_label,
+                polymerization_degree=config.polymerization_degree,
+                dt=0.1,
+                localization_precision=0.018,
+                boost_classes=None,
+                verbose=verbose,
+            )
+            all_traj.extend(X_dim)
+            labels.append(y_dim)
+            lengths.append(length_dim)
+            if class_names is None:
+                class_names = list(class_names_dim)
+
+        y = np.concatenate(labels)
+        lengths_array = np.concatenate(lengths)
+        class_names = class_names or self.class_names
+
+        X_traj = self._pad_and_normalise(all_traj)
+        X_feat = self.feature_extractor.extract_batch(all_traj)
+
+        (X_traj_train, X_traj_temp, X_feat_train, X_feat_temp, y_train, y_temp) = train_test_split(
+            X_traj,
+            X_feat,
+            y,
+            test_size=0.3,
+            random_state=self.random_seed,
+            stratify=y,
         )
-        X_traj_train, X_traj_val, X_feat_train, X_feat_val, y_train, y_val = train_test_split(
-            X_traj_temp, X_feat_temp, y_temp, test_size=0.176, stratify=y_temp, random_state=self.random_seed
+        (X_traj_val, X_traj_test, X_feat_val, X_feat_test, y_val, y_test) = train_test_split(
+            X_traj_temp,
+            X_feat_temp,
+            y_temp,
+            test_size=0.5,
+            random_state=self.random_seed,
+            stratify=y_temp,
         )
 
-        X_feat_train = self.scaler.fit_transform(X_feat_train)
+        self.scaler.fit(X_feat_train)
+        X_feat_train = self.scaler.transform(X_feat_train)
         X_feat_val = self.scaler.transform(X_feat_val)
         X_feat_test = self.scaler.transform(X_feat_test)
 
-        self.X_traj_train = X_traj_train
-        self.X_feat_train = X_feat_train
-        self.y_train = y_train
-        self.X_traj_val = X_traj_val
-        self.X_feat_val = X_feat_val
-        self.y_val = y_val
-        self.X_traj_test = X_traj_test
-        self.X_feat_test = X_feat_test
-        self.y_test = y_test
+        bundle = DatasetBundle(
+            X_traj_train=X_traj_train,
+            X_traj_val=X_traj_val,
+            X_traj_test=X_traj_test,
+            X_feat_train=X_feat_train.astype(np.float32),
+            X_feat_val=X_feat_val.astype(np.float32),
+            X_feat_test=X_feat_test.astype(np.float32),
+            y_train=y_train.astype(int),
+            y_val=y_val.astype(int),
+            y_test=y_test.astype(int),
+            lengths=lengths_array,
+            class_names=class_names,
+            metadata={
+                "polymerization_degree": config.polymerization_degree,
+                "ratio_3d": config.ratio_3d,
+                "mode": config.canonical_mode(),
+                "n_samples_per_class": config.n_samples_per_class,
+            },
+        )
+        return bundle
 
-        if verbose:
-            print("\n-> Daten erfolgreich vorbereitet!")
+    def _plan_generation(self, config: TrainingConfig) -> List[Tuple[str, int]]:
+        mode = config.canonical_mode()
+        samples = max(1, int(config.n_samples_per_class))
+        if mode == "2d":
+            return [("2D", samples)]
+        if mode == "3d":
+            return [("3D", samples)]
+        n_3d = int(round(samples * config.ratio_3d))
+        n_3d = np.clip(n_3d, 0, samples)
+        n_2d = samples - n_3d
+        plan: List[Tuple[str, int]] = []
+        if n_2d > 0:
+            plan.append(("2D", n_2d))
+        if n_3d > 0:
+            plan.append(("3D", n_3d))
+        return plan or [("2D", samples)]
 
-    def augment_training_with_class(self, target_class_index: int, n_new: int = 1000, ratio_3d: float = 0.5, polymerization_degree: float = 0.5, verbose: bool = True):
-        """Generiert neue Trajektorien für die schwächste Klasse und fügt sie dem Train-Set hinzu.
-        - target_class_index: 0=Normal,1=Subdiffusion,2=Superdiffusion,3=Confined
-        - n_new: Anzahl neuer Trainingsbeispiele für diese Klasse (gesamt über 2D+3D)
-        - ratio_3d: Anteil 3D (0..1). Rest wird als 2D generiert.
-        """
-        n3d = int(round(n_new * ratio_3d))
-        n2d = n_new - n3d
-
-        def sample_class(dimensionality: str, need: int):
-            X_acc, y_acc = [], []
-            lengths_acc = []
-            # Generator produziert alle Klassen; wir filtern gezielt auf target_class_index
-            # Wir rufen iterativ mit moderater Stückzahl auf, bis genug gesammelt.
-            chunk = max(50, need)  # pro Klasse
-            while len(X_acc) < need:
-                X_list, y_arr, lengths_arr, _ = generate_spt_dataset(
-                    n_samples_per_class=chunk,
-                    min_length=50,
-                    max_length=self.max_length,
-                    dimensionality=dimensionality,
-                    polymerization_degree=polymerization_degree,
-                    dt=0.01,
-                    localization_precision=0.015,
-                    boost_classes=None,
-                    verbose=False
-                )
-                for X_i, y_i, L_i in zip(X_list, y_arr, lengths_arr):
-                    if y_i == target_class_index:
-                        X_acc.append(X_i)
-                        y_acc.append(y_i)
-                        lengths_acc.append(L_i)
-                        if len(X_acc) >= need:
-                            break
-            return X_acc, np.array(y_acc), np.array(lengths_acc)
-
-        X2_list, y2, _ = [], np.array([]), None
-        X3_list, y3, _ = [], np.array([]), None
-        if n2d > 0:
-            X2_list, y2, _ = sample_class('2D', n2d)
-        if n3d > 0:
-            X3_list, y3, _ = sample_class('3D', n3d)
-
-        X_new_list = X2_list + X3_list
-        y_new = np.concatenate([y2, y3]) if y2.size or y3.size else np.array([])
-
-        # Shuffle neu generierte
-        if len(X_new_list) == 0:
-            if verbose:
-                print("Keine neuen Beispiele generiert.")
-            return
-        idx = np.arange(len(X_new_list))
-        rng = np.random.default_rng(self.random_seed)
-        rng.shuffle(idx)
-        X_new_list = [X_new_list[i] for i in idx]
-        y_new = y_new[idx]
-
-        # Feature-Extraktion + is_3D-Feature
-        X_new_feat = self.feature_extractor.extract_batch(X_new_list)
-        is_3d = np.array([1 if traj.shape[1] == 3 else 0 for traj in X_new_list], dtype=float).reshape(-1, 1)
-        X_new_feat = np.concatenate([X_new_feat, is_3d], axis=1)
-        # Transform mit bestehendem Scaler (nicht neu fitten, um Val/Test konsistent zu halten)
-        X_new_feat_scaled = self.scaler.transform(X_new_feat)
-
-        # Padding Trajektorien (immer 3 Kanäle)
-        X_new_traj = np.zeros((len(X_new_list), self.max_length, 3), dtype=np.float32)
-        for i, traj in enumerate(X_new_list):
+    def _pad_and_normalise(self, trajectories: Iterable[np.ndarray]) -> np.ndarray:
+        padded = np.zeros((len(trajectories), self.max_length, 3), dtype=np.float32)
+        for i, traj in enumerate(trajectories):
+            traj = np.asarray(traj, dtype=np.float32)
+            if traj.ndim == 1:
+                traj = traj[:, None]
             if traj.shape[1] == 2:
-                traj3 = np.zeros((len(traj), 3), dtype=traj.dtype)
-                traj3[:, :2] = traj
+                traj = np.concatenate([traj, np.zeros((traj.shape[0], 1), dtype=np.float32)], axis=1)
+            elif traj.shape[1] > 3:
+                traj = traj[:, :3]
+
+            centred = traj - traj[0:1]
+            scale = np.std(centred) + 1e-6
+            centred /= scale
+
+            length = min(self.max_length, centred.shape[0])
+            if centred.shape[0] >= self.max_length:
+                start = np.random.randint(0, centred.shape[0] - self.max_length + 1)
+                segment = centred[start : start + self.max_length]
+                padded[i] = segment
             else:
-                traj3 = traj
-            L = len(traj3)
-            if L > self.max_length:
-                start = np.random.randint(0, L - self.max_length + 1)
-                segment = traj3[start:start + self.max_length]
-                X_new_traj[i, :, :] = segment.astype(np.float32)
-            else:
-                X_new_traj[i, :L, :] = traj3[:L].astype(np.float32)
+                padded[i, :length, :] = centred[:length]
+        return padded
 
-        # An Train-Set anhängen und durchmischen
-        self.X_traj_train = np.concatenate([self.X_traj_train, X_new_traj], axis=0)
-        self.X_feat_train = np.concatenate([self.X_feat_train, X_new_feat_scaled], axis=0)
-        self.y_train = np.concatenate([self.y_train, y_new], axis=0)
+    def _compute_class_weights(self, y_train: ArrayLike) -> Optional[Dict[int, float]]:
+        classes = np.unique(y_train)
+        if len(classes) < 2:
+            return None
+        weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_train)
+        return {int(cls): float(w) for cls, w in zip(classes, weights)}
 
-        perm = np.random.permutation(len(self.y_train))
-        self.X_traj_train = self.X_traj_train[perm]
-        self.X_feat_train = self.X_feat_train[perm]
-        self.y_train = self.y_train[perm]
-
-        if verbose:
-            cname = self.class_names[target_class_index] if target_class_index < len(self.class_names) else str(target_class_index)
-            print(f"? Augment: +{len(X_new_list)} Samples für schwächste Klasse '{cname}' (2D/3D={n2d}/{n3d})")
-    def train(
+    def _make_dataset(
         self,
-        epochs: int = 100,
-        batch_size: int = 32,
-        verbose: int = 1
-    ):
-        """
-        Trainiere Modell mit Best Practices
-        
-        Args:
-            epochs: Maximale Anzahl Epochen
-            batch_size: Batch Size
-            verbose: Keras Verbosity (0, 1, 2)
-            
-        Training-Strategie:
-        -------------------
-        
-        1. **Early Stopping**: Stoppt bei Validierungs-Loss Plateau
-           Patience: 15 Epochen
-           Restore Best Weights: Ja
-           
-        2. **Learning Rate Reduction**: Bei Validierungs-Loss Plateau
-           Factor: 0.5 (halbiert LR)
-           Patience: 8 Epochen
-           Min LR: 1e-7
-           
-        3. **Model Checkpoint**: Speichert bestes Modell
-           Monitor: val_accuracy
-           Mode: max
-           
-        4. **Class Weighting**: Korrigiert fÃ¼r Klassenimbalance
-           Automatisch berechnet aus Training-Labels
-        
-        Theoretische Rechtfertigung:
-        ----------------------------
-        - **Early Stopping**: Verhindert Overfitting (Prechelt, 1998)
-        - **LR Scheduling**: Verbessert Konvergenz (Smith, 2017)
-        - **Batch Normalization**: Reduziert Internal Covariate Shift (Ioffe & Szegedy, 2015)
-        - **Dropout**: Ensemble-Effekt, verhindert Co-Adaptation (Srivastava et al., 2014)
-        """
-        print("\n" + "="*80)
-        print("TRAINING")
-        print("="*80)
-        print(f"Epochs: {epochs}")
-        print(f"Batch Size: {batch_size}")
-        print(f"Optimizer: Adam (lr=1e-3)")
-        print("Callbacks: Early Stopping, LR Reduction, Checkpointing")
-        print("="*80 + "\n")
-        
-        # Compute Class Weights
-        class_weights_array = compute_class_weight(
-            'balanced',
-            classes=np.unique(self.y_train),
-            y=self.y_train
+        X_traj: ArrayLike,
+        X_feat: ArrayLike,
+        y: ArrayLike,
+        batch_size: int,
+        *,
+        shuffle: bool,
+    ) -> tf.data.Dataset:
+        y_onehot = tf.one_hot(y.astype(int), depth=len(self.class_names), dtype=tf.float32)
+        ds = tf.data.Dataset.from_tensor_slices(((X_traj, X_feat), y_onehot))
+        if shuffle:
+            ds = ds.shuffle(buffer_size=len(X_traj), seed=self.random_seed, reshuffle_each_iteration=True)
+        return ds.batch(batch_size).cache().prefetch(tf.data.AUTOTUNE)
+
+    def _build_callbacks(self, epochs: int) -> List[keras.callbacks.Callback]:
+        early = keras.callbacks.EarlyStopping(patience=max(5, epochs // 5), restore_best_weights=True, monitor="val_accuracy")
+        reduce = keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=max(3, epochs // 6), monitor="val_loss", min_lr=1e-5)
+        return [early, reduce]
+
+    def _store_cached_dataset(self, path: Path, bundle: DatasetBundle) -> None:
+        np.savez_compressed(
+            path,
+            X_traj_train=bundle.X_traj_train,
+            X_traj_val=bundle.X_traj_val,
+            X_traj_test=bundle.X_traj_test,
+            X_feat_train=bundle.X_feat_train,
+            X_feat_val=bundle.X_feat_val,
+            X_feat_test=bundle.X_feat_test,
+            y_train=bundle.y_train,
+            y_val=bundle.y_val,
+            y_test=bundle.y_test,
+            lengths=bundle.lengths,
+            class_names=np.array(bundle.class_names, dtype=object),
+            metadata=json.dumps(bundle.metadata),
         )
-        class_weights = {i: w for i, w in enumerate(class_weights_array)}
-        
-        print("Class Weights (fÃ¼r Imbalance-Korrektur):")
-        for i, name in enumerate(self.class_names):
-            print(f"  {name}: {class_weights[i]:.3f}")
-        print()
-        
-        # Callbacks
-        callbacks = [
-            EarlyStopping(
-                monitor='val_loss',
-                patience=15,
-                restore_best_weights=True,
-                verbose=1
-            ),
-            ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=8,
-                min_lr=1e-7,
-                verbose=1
-            ),
-            ModelCheckpoint(
-                os.path.join(self.output_dir, 'best_model.keras'),
-                monitor='val_accuracy',
-                save_best_only=True,
-                mode='max',
-                verbose=1
-            )
-        ]
-        
-        # Training
-        history = self.model.fit(
-            [self.X_traj_train, self.X_feat_train],
-            self.y_train,
-            validation_data=([self.X_traj_val, self.X_feat_val], self.y_val),
-            epochs=epochs,
-            batch_size=batch_size,
-            class_weight=class_weights,
-            callbacks=callbacks,
-            verbose=verbose
-        )
-        
-        self.history = history
-        
-        print("\nâœ… Training abgeschlossen!")
-        
-        # Plot Training History
-        self.plot_training_history()
-    
-    def plot_training_history(self):
-        """Visualisiere Training History"""
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-        
-        # Loss
-        ax1.plot(self.history.history['loss'], label='Train Loss', linewidth=2)
-        ax1.plot(self.history.history['val_loss'], label='Val Loss', linewidth=2)
-        ax1.set_xlabel('Epoch', fontsize=12)
-        ax1.set_ylabel('Loss', fontsize=12)
-        ax1.set_title('Training & Validation Loss', fontsize=14, fontweight='bold')
-        ax1.legend(fontsize=11)
-        ax1.grid(True, alpha=0.3)
-        
-        # Accuracy
-        ax2.plot(self.history.history['accuracy'], label='Train Acc', linewidth=2)
-        ax2.plot(self.history.history['val_accuracy'], label='Val Acc', linewidth=2)
-        ax2.set_xlabel('Epoch', fontsize=12)
-        ax2.set_ylabel('Accuracy', fontsize=12)
-        ax2.set_title('Training & Validation Accuracy', fontsize=14, fontweight='bold')
-        ax2.legend(fontsize=11)
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'training_history.png'), dpi=150)
-        print(f"âœ… Training History Plot gespeichert: {self.output_dir}/training_history.png")
-        try:
-            plt.close()
-        except Exception:
-            pass
 
-
-    
-    def evaluate(self, verbose: bool = True):
-        """
-        Evaluiere Modell auf Test-Set
-        
-        Metriken:
-        ---------
-        1. **Overall Accuracy**: Gesamtgenauigkeit
-        2. **Per-Class Metrics**: Precision, Recall, F1-Score pro Klasse
-        3. **Confusion Matrix**: Fehleranalyse
-        
-        Wissenschaftliche Interpretation:
-        ---------------------------------
-        - **Precision**: P(true class | predicted class) - Wichtig fÃ¼r Anwendungen
-          wo False Positives kritisch sind
-        - **Recall**: P(predicted class | true class) - Wichtig fÃ¼r vollstÃ¤ndige Detektion
-        - **F1-Score**: Harmonisches Mittel von Precision und Recall
-          F1 = 2Â·(PrecisionÂ·Recall)/(Precision+Recall)
-        """
-        if verbose:
-            print("\n" + "="*80)
-            print("EVALUATION AUF TEST-SET")
-            print("="*80)
-        
-        # Predictions
-        y_pred_probs = self.model.predict(
-            [self.X_traj_test, self.X_feat_test],
-            verbose=0
-        )
-        y_pred = np.argmax(y_pred_probs, axis=1)
-        
-        # Overall Accuracy
-        accuracy = np.mean(y_pred == self.y_test)
-        
-        if verbose:
-            print(f"\nðŸ“Š OVERALL ACCURACY: {accuracy:.4f} ({accuracy*100:.2f}%)")
-        
-        # Classification Report
-        if verbose:
-            print("\n" + "="*80)
-            print("CLASSIFICATION REPORT")
-            print("="*80)
-        
-        report = classification_report(
-            self.y_test,
-            y_pred,
-            target_names=self.class_names,
-            digits=4
-        )
-        
-        if verbose:
-            print(report)
-        
-        # Confusion Matrix
-        cm = confusion_matrix(self.y_test, y_pred)
-        
-        # Plot Confusion Matrix
-        plt.figure(figsize=(10, 8))
-        try:
-            import seaborn as sns
-            sns.heatmap(
-                cm,
-                annot=True,
-                fmt='d',
-                cmap='Blues',
-                xticklabels=self.class_names,
-                yticklabels=self.class_names,
-                cbar_kws={'label': 'Count'}
-            )
-        except Exception:
-            plt.imshow(cm, cmap='Blues')
-            for i in range(len(self.class_names)):
-                for j in range(len(self.class_names)):
-                    plt.text(j, i, int(cm[i, j]), ha='center', va='center', color='black')
-            plt.xticks(np.arange(len(self.class_names)), self.class_names)
-            plt.yticks(np.arange(len(self.class_names)), self.class_names)
-            plt.colorbar(label='Count')
-        plt.xlabel('Predicted Class', fontsize=12)
-        plt.ylabel('True Class', fontsize=12)
-        plt.title('Confusion Matrix - Test Set', fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'confusion_matrix.png'), dpi=150)
-        print(f"\nâœ… Confusion Matrix gespeichert: {self.output_dir}/confusion_matrix.png")
-        try:
-            plt.close()
-        except Exception:
-            pass
-
-
-        
-        return accuracy, report, cm
-    
-    def save_model(self, verbose: bool = True):
-        """
-        Speichere trainiertes Modell und Metadaten
-        
-        Gespeichert werden:
-        -------------------
-        1. **Model (.keras)**: VollstÃ¤ndiges Keras-Modell
-        2. **Scaler (.pkl)**: StandardScaler fÃ¼r Features
-        3. **Feature Names (.pkl)**: Namen der 24 Features
-        4. **Metadata (.json)**: Konfiguration, Datum, Performance
-        5. **Training History (.pkl)**: Loss/Accuracy VerlÃ¤ufe
-        """
-        if verbose:
-            print("\n" + "="*80)
-            print("MODELL SPEICHERN")
-            print("="*80)
-        
-        # Model
-        model_path = os.path.join(self.output_dir, 'spt_classifier.keras')
-        self.model.save(model_path)
-        if verbose:
-            print(f"âœ… Modell gespeichert: {model_path}")
-        
-        # Scaler
-        scaler_path = os.path.join(self.output_dir, 'feature_scaler.pkl')
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(self.scaler, f)
-        if verbose:
-            print(f"âœ… Feature Scaler gespeichert: {scaler_path}")
-        
-        # Feature Names
-        feature_names_path = os.path.join(self.output_dir, 'feature_names.pkl')
-        with open(feature_names_path, 'wb') as f:
-            pickle.dump(list(self.feature_extractor.feature_names) + ['is_3D'], f)
-        if verbose:
-            print(f"âœ… Feature Names gespeichert: {feature_names_path}")
-        
-        # Metadata
-        metadata = {
-            'creation_date': datetime.now().isoformat(),
-            'max_length': self.max_length,
-            'n_features': self.n_features,
-            'input_dim': self.input_dim,
-            'class_names': self.class_names,
-            'random_seed': self.random_seed,
-            'total_parameters': self.model.count_params()
-        }
-        
-        metadata_path = os.path.join(self.output_dir, 'metadata.json')
-        with open(metadata_path, 'w') as f:
-            import json
-            json.dump(metadata, f, indent=2)
-        if verbose:
-            print(f"âœ… Metadata gespeichert: {metadata_path}")
-        
-        # Training History
-        if self.history is not None:
-            history_path = os.path.join(self.output_dir, 'training_history.pkl')
-            with open(history_path, 'wb') as f:
-                pickle.dump(self.history.history, f)
-            if verbose:
-                print(f"âœ… Training History gespeichert: {history_path}")
-        
-        if verbose:
-            print("="*80)
-            print(f"âœ… ALLE DATEIEN IN: {self.output_dir}/")
-            print("="*80)
-
-
-def run_complete_training(
-    n_samples_per_class: int = 3000,
-    dimensionality: str = '2D',
-    polymerization_degree: float = 0.5,
-    epochs: int = 100,
-    batch_size: int = 32,
-    output_dir: str = './spt_trained_model'
-):
-    """
-    FÃ¼hre komplettes End-to-End Training aus
-    
-    Args:
-        n_samples_per_class: Samples pro Diffusionsklasse
-        dimensionality: '2D' oder '3D'
-        polymerization_degree: 0.0-1.0 (Polymer-Zustand)
-        epochs: Max Epochen
-        batch_size: Batch Size
-        output_dir: Output-Verzeichnis
-        
-    Returns:
-        trainer: SPTClassifierTrainer Instanz mit trainiertem Modell
-    """
-    print("\n" + "="*80)
-    print("SPT CLASSIFIER - KOMPLETTES TRAINING")
-    print("="*80)
-    print(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*80)
-    
-    # Initialisiere Trainer
-    trainer = SPTClassifierTrainer(
-        max_length=2000,
-        output_dir=output_dir,
-        random_seed=42
-    )
-    
-    # 1. Datengenerierung
-    trainer.generate_training_data(
-        n_samples_per_class=n_samples_per_class,
-        dimensionality=dimensionality,
-        polymerization_degree=polymerization_degree,
-        verbose=True
-    )
-    
-    # 2. Modell-Konstruktion
-    trainer.build_model(verbose=True)
-    
-    # 3. Training
-    trainer.train(
-        epochs=epochs,
-        batch_size=batch_size,
-        verbose=1
-    )
-    
-    # 4. Evaluation
-    trainer.evaluate(verbose=True)
-    
-    # 5. Speichern
-    trainer.save_model(verbose=True)
-    
-    print("\n" + "="*80)
-    print("âœ… TRAINING ERFOLGREICH ABGESCHLOSSEN!")
-    print(f"Ende: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*80)
-    
-    return trainer
-
-
-def run_complete_training_both(
-    n_samples_per_class: int = 10000,
-    ratio_3d: float = 0.5,
-    polymerization_degree: float = 0.5,
-    epochs_per_round: int = 200,
-    max_rounds: int = 15,
-    target_overall: float = 0.97,
-    target_min_f1: float = 0.95,
-    batch_size: int = 512,
-    output_dir: str = './spt_trained_model'
-):
-    """End-to-end Training fÃ¼r gemischte 2D+3D Daten mit iterativer Optimierung."""
-    print("\n" + "="*80)
-    print("SPT CLASSIFIER - KOMPLETTES TRAINING (2D+3D)")
-    print("="*80)
-    print(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*80)
-
-    trainer = SPTClassifierTrainer(
-        max_length=2000,
-        output_dir=output_dir,
-        random_seed=42
-    )
-
-    trainer.generate_training_data_both(
-        n_samples_per_class=n_samples_per_class,
-        ratio_3d=ratio_3d,
-        polymerization_degree=polymerization_degree,
-        verbose=True
-    )
-
-    trainer.build_model(verbose=True)
-
-    # Iteratives Training gegen Validierungs-Set
-    for r in range(1, max_rounds + 1):
-        print("\n" + "-"*80)
-        print(f"RUNDE {r}/{max_rounds}")
-        print("-"*80)
-        trainer.train(epochs=epochs_per_round, batch_size=batch_size, verbose=1)
-
-        # Val-Auswertung
-        y_val_pred = np.argmax(trainer.model.predict([trainer.X_traj_val, trainer.X_feat_val], verbose=0), axis=1)
-        acc_val = np.mean(y_val_pred == trainer.y_val)
-        rep = classification_report(trainer.y_val, y_val_pred, target_names=trainer.class_names, output_dict=True)
-        min_f1 = min(rep[c]['f1-score'] for c in trainer.class_names)
-        print(f"â†’ Val Accuracy: {acc_val:.4f}; Min per-class F1: {min_f1:.4f}")
-        if acc_val >= target_overall and min_f1 >= target_min_f1:
-            print("Ziele erreicht â€“ beende iteratives Training.")
-            break
-        else:
-            print("Ziele noch nicht erreicht â€“ weitere Runde.")
-            # adaptiv neue Daten für schwächste Klasse (geringster F1) generieren
-            rep = classification_report(trainer.y_val, y_val_pred, target_names=trainer.class_names, output_dict=True)
-            f1s = [rep[c]['f1-score'] for c in trainer.class_names]
-            weakest_idx = int(np.argmin(f1s))
-            trainer.augment_training_with_class(
-                target_class_index=weakest_idx,
-                n_new=[int(0.2*len(trainer.y_train)), 500][1] if len(trainer.y_train) < 2500 else int(0.2*len(trainer.y_train)),
-                ratio_3d=ratio_3d,
-                polymerization_degree=polymerization_degree,
-                verbose=True
+    def _load_cached_dataset(self, path: Path) -> DatasetBundle:
+        with np.load(path, allow_pickle=True) as data:
+            metadata = json.loads(str(data["metadata"]))
+            return DatasetBundle(
+                X_traj_train=data["X_traj_train"],
+                X_traj_val=data["X_traj_val"],
+                X_traj_test=data["X_traj_test"],
+                X_feat_train=data["X_feat_train"],
+                X_feat_val=data["X_feat_val"],
+                X_feat_test=data["X_feat_test"],
+                y_train=data["y_train"],
+                y_val=data["y_val"],
+                y_test=data["y_test"],
+                lengths=data["lengths"],
+                class_names=list(data["class_names"].tolist()),
+                metadata=metadata,
             )
 
-    # Test-Evaluation und Speichern
-    trainer.evaluate(verbose=True)
-    trainer.save_model(verbose=True)
-
-    print("\n" + "="*80)
-    print("âœ“ TRAINING ERFOLGREICH ABGESCHLOSSEN!")
-    print(f"Ende: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*80)
-
-    return trainer
+    @staticmethod
+    def _set_random_seeds(seed: int) -> None:
+        np.random.seed(seed)
+        tf.random.set_seed(seed)
 
 
-# =============================================================================
-# MAIN: AUSFÃœHRUNG
-# =============================================================================
-
-if __name__ == '__main__':
-    # Ressourcenschonende Defaults, gemischtes 2D+3D Training
-    CONFIG = {
-        'n_samples_per_class': 10000,
-        'ratio_3d': 0.5,
-        'polymerization_degree': 0.5,
-        'epochs_per_round': 200,
-        'max_rounds': 15,
-        'target_overall': 0.97,
-        'target_min_f1': 0.95,
-        'batch_size': 512,
-        'output_dir': './spt_trained_model'
-    }
-
-    print("\nKONFIGURATION:")
-    for key, val in CONFIG.items():
-        print(f"  {key}: {val}")
-
-    trainer = run_complete_training_both(**CONFIG)
-
-    print("\n" + "="*80)
-    print("AUSGABE-DATEIEN:")
-    print("="*80)
-    print(f"  • spt_classifier.keras         - Trainiertes Modell")
-    print(f"  • feature_scaler.pkl           - Feature Standardisierung")
-    print(f"  • feature_names.pkl            - Feature-Namen Liste")
-    print(f"  • metadata.json                - Modell-Metadaten")
-    print(f"  • training_history.pkl         - Training Verlauf")
-    print(f"  • training_history.png         - Loss/Accuracy Plots")
-    print(f"  • confusion_matrix.png         - Confusion Matrix")
-    print("="*80)
-    print(f"\nAlle Dateien in: {CONFIG['output_dir']}/")
-    print("="*80)
+def _json_converter(obj):  # pragma: no cover - fallback for numpy types
+    if isinstance(obj, np.generic):
+        return obj.item()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serialisable")
 
 
-
+if __name__ == "__main__":
+    trainer = SPTClassifierTrainer(max_length=400)
+    config = TrainingConfig(n_samples_per_class=150, mode="both", ratio_3d=0.35, epochs=25, batch_size=128)
+    artifacts = trainer.run_complete_training(config)
+    print(f"Training run complete. Artifacts stored at {artifacts}")
