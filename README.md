@@ -337,6 +337,7 @@ Highlights der überarbeiteten Oberfläche:
 - Schnellstart-Preset für 2D/3D-Mischungen, inklusive automatischer Daten-Cache-Datei
 - Live-Plot für Trainings- und Validierungsgenauigkeit mit epochengenauer Aktualisierung
 - Strukturiertes Log aller Pipeline-Schritte (Datengenerierung → Modellbau → Training → Evaluation → Speichern)
+- Direkte Anzeige des Artefakt-Ordners inklusive Button "Ordner öffnen" für einen schnellen Sprung ins Dateisystem
 
 💡 **Hinweis zum Cache:** Der Trainer legt für jede eindeutige Kombination aus Dimensionalität, Polymerisationsgrad,
 Sample-Zahl und Trajektorienlänge eine validierte Cache-Datei an. Bei erneutem Start mit identischen Einstellungen
@@ -354,6 +355,20 @@ run_YYYYmmdd-HHMMSS/
 ├── history.json           # Loss/Accuracy pro Epoche
 └── metadata.json          # Datensatz- & Trainingsparameter
 ```
+
+### 4a. Desktop-Build (optional)
+
+Falls du die Anwendung ohne Python-Interpreter starten möchtest, kannst du mit [PyInstaller](https://pyinstaller.org) einen
+eigenständigen Desktop-Build erzeugen:
+
+```bash
+pip install pyinstaller  # einmalig
+python build_desktop_app.py --onefile --windowed
+```
+
+Das Skript erzeugt im Verzeichnis `dist/` eine ausführbare Datei (`SPTTrainerApp`), die du wie ein klassisches Desktop-Programm
+starten kannst. Über `--onedir` erhältst du alternativ einen Ordner mit allen Abhängigkeiten; `--clean` entfernt vorab alte
+Build-Artefakte.
 
 ### 5. Trainiertes Modell wiederverwenden
 

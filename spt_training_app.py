@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import io
+import os
+import platform
 import queue
+import subprocess
 import threading
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -48,6 +51,7 @@ class TrainingApp:
         self.training_thread: threading.Thread | None = None
         self.trainer: SPTClassifierTrainer | None = None
         self.training_config: TrainingConfig | None = None
+        self.last_artifact_dir: Path | None = None
 
         # GUI-States
         self.samples_var = tk.IntVar(value=500)
@@ -63,6 +67,7 @@ class TrainingApp:
         self.stage_var = tk.StringVar(value="Bereit.")
         self.stage_progress_var = tk.DoubleVar(value=0.0)
         self.epoch_progress_var = tk.DoubleVar(value=0.0)
+        self.artifact_path_var = tk.StringVar(value="Noch kein Lauf ausgeführt.")
 
         self.train_acc = []
         self.val_acc = []
@@ -143,6 +148,21 @@ class TrainingApp:
         ttk.Label(progress_frame, text="Epoche").grid(row=2, column=0, sticky="w", padx=5, pady=2)
         self.epoch_bar = ttk.Progressbar(progress_frame, maximum=1, variable=self.epoch_progress_var)
         self.epoch_bar.grid(row=3, column=0, sticky="we", padx=5, pady=2)
+
+        artifact_row = ttk.Frame(progress_frame)
+        artifact_row.grid(row=4, column=0, sticky="we", padx=5, pady=(10, 0))
+        artifact_row.grid_columnconfigure(0, weight=1)
+        ttk.Label(artifact_row, textvariable=self.artifact_path_var, wraplength=500, justify="left").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.open_dir_button = ttk.Button(
+            artifact_row,
+            text="Ordner öffnen",
+            command=self._open_artifact_dir,
+            state="disabled",
+            width=18,
+        )
+        self.open_dir_button.grid(row=0, column=1, sticky="e", padx=(10, 0))
 
         # Logs + Plot Bereich
         main_frame = ttk.Frame(self.master)
@@ -229,6 +249,9 @@ class TrainingApp:
         self.stage_progress_var.set(0.0)
         self.epoch_progress_var.set(0.0)
         self.epoch_bar.configure(maximum=1)
+        self.last_artifact_dir = None
+        self.artifact_path_var.set("Noch kein Lauf ausgeführt.")
+        self.open_dir_button.configure(state="disabled")
         self.train_acc.clear()
         self.val_acc.clear()
         self._update_plot()
@@ -401,6 +424,9 @@ class TrainingApp:
                 elif kind == "done":
                     _, success, out_dir = item
                     if success:
+                        self.last_artifact_dir = Path(out_dir)
+                        self.artifact_path_var.set(f"Artefakte: {out_dir}")
+                        self.open_dir_button.configure(state="normal")
                         messagebox.showinfo(
                             "Training abgeschlossen",
                             f"Das Training wurde erfolgreich abgeschlossen.\nArtefakte befinden sich in:\n{out_dir}",
@@ -423,6 +449,19 @@ class TrainingApp:
         self.log_widget.configure(state="normal")
         self.log_widget.delete("1.0", tk.END)
         self.log_widget.configure(state="disabled")
+
+    def _open_artifact_dir(self) -> None:
+        if not self.last_artifact_dir:
+            messagebox.showinfo("Keine Artefakte", "Es wurde noch kein Lauf abgeschlossen.")
+            return
+
+        path = self.last_artifact_dir
+        if platform.system() == "Windows":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif platform.system() == "Darwin":
+            subprocess.run(["open", str(path)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(path)], check=False)
 
 
 def main() -> None:
