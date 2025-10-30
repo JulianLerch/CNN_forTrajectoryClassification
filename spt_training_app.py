@@ -103,8 +103,10 @@ class TrainingApp:
         self.ratio_label = ttk.Label(config_frame, text="50 %")
         self.ratio_label.grid(row=1, column=2, sticky="w", padx=5, pady=5)
 
-        ttk.Label(config_frame, text="Polymerisationsgrad:").grid(row=1, column=3, sticky="w", padx=5, pady=5)
-        ttk.Scale(config_frame, from_=0.0, to=1.0, variable=self.poly_var).grid(row=1, column=4, sticky="we", padx=5, pady=5)
+        # Info: Polygrad wird durch Augmentation überschrieben
+        info_label = ttk.Label(config_frame, text="ℹ️ Polymerisationsgrad: Training nutzt ALLE Grade (0-100%) automatisch!",
+                              foreground='blue', font=('', 9, 'italic'))
+        info_label.grid(row=1, column=3, columnspan=3, sticky="w", padx=5, pady=5)
 
         ttk.Label(config_frame, text="Max. Trajektorienlänge:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
         ttk.Spinbox(config_frame, from_=50, to=5000, textvariable=self.max_len_var, increment=50, width=10).grid(

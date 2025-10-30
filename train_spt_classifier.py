@@ -34,6 +34,7 @@ from tensorflow import keras
 from tensorflow.keras import layers, models
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 from tensorflow.keras.regularizers import l2
+from tensorflow.keras import mixed_precision
 
 # Sklearn Imports
 from sklearn.model_selection import train_test_split
@@ -50,6 +51,16 @@ print("SPT DEEP LEARNING CLASSIFIER - TRAINING SYSTEM")
 print("="*80)
 print(f"TensorFlow Version: {tf.__version__}")
 print(f"Keras Version: {keras.__version__}")
+
+# MIXED PRECISION TRAINING: 2x Speedup on modern GPUs!
+# Uses FP16 for computation, FP32 for numerical stability
+try:
+    policy = mixed_precision.Policy('mixed_float16')
+    mixed_precision.set_global_policy(policy)
+    print(f"Mixed Precision: ENABLED (FP16) - Expect ~2x speedup on GPU!")
+except Exception as e:
+    print(f"Mixed Precision: DISABLED (fallback to FP32) - {e}")
+
 print("="*80 + "\n")
 
 
@@ -527,8 +538,8 @@ class SPTClassifierTrainer:
         x = layers.BatchNormalization(name='bn_fusion2')(x)
         x = layers.Dropout(0.4, name='fusion_dropout2')(x)
         
-        # Output Layer
-        outputs = layers.Dense(4, activation='softmax', name='output')(x)
+        # Output Layer (FP32 for numerical stability with mixed precision)
+        outputs = layers.Dense(4, activation='softmax', dtype='float32', name='output')(x)
         
         # Build Model
         model = models.Model(
@@ -1050,22 +1061,28 @@ class SPTClassifierTrainer:
         if verbose:
             print(f"Feature Scaler gespeichert: {scaler_path}")
         
-        # Feature Names
+        # Feature Names (UPDATED: inkl. D, Poly, Dim)
         feature_names_path = os.path.join(self.output_dir, 'feature_names.pkl')
+        feature_names_full = list(self.feature_extractor.feature_names) + ['D_log10', 'polymerization_degree', 'dimensionality']
         with open(feature_names_path, 'wb') as f:
-            pickle.dump(list(self.feature_extractor.feature_names) + ['is_3D'], f)
+            pickle.dump(feature_names_full, f)
         if verbose:
             print(f"Feature Names gespeichert: {feature_names_path}")
+            print(f"  Total Features: {len(feature_names_full)} (24 physics + 3 experimental)")
         
         # Metadata
         metadata = {
             'creation_date': datetime.now().isoformat(),
             'max_length': self.max_length,
             'n_features': self.n_features,
+            'n_physics_features': 24,
+            'n_experimental_features': 3,
+            'experimental_features': ['D_log10', 'polymerization_degree', 'dimensionality'],
             'input_dim': self.input_dim,
             'class_names': self.class_names,
             'random_seed': self.random_seed,
-            'total_parameters': self.model.count_params()
+            'total_parameters': self.model.count_params(),
+            'model_version': '2.0_full_D_range_augmented'
         }
         
         metadata_path = os.path.join(self.output_dir, 'metadata.json')
@@ -1087,6 +1104,81 @@ class SPTClassifierTrainer:
             print("="*80)
             print(f"ALLE DATEIEN IN: {self.output_dir}/")
             print("="*80)
+
+    @staticmethod
+    def load_model(model_dir: str, verbose: bool = True):
+        """
+        Lade trainiertes Modell und alle Metadaten
+
+        Args:
+            model_dir: Verzeichnis mit gespeichertem Modell
+            verbose: Print Output?
+
+        Returns:
+            Dictionary mit: model, scaler, feature_extractor, metadata, feature_names
+        """
+        import json
+
+        if verbose:
+            print("\n" + "="*80)
+            print("MODELL LADEN")
+            print("="*80)
+            print(f"Lade aus: {model_dir}")
+
+        # Load Model
+        model_path = os.path.join(model_dir, 'spt_classifier.keras')
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model not found: {model_path}")
+        model = keras.models.load_model(model_path)
+        if verbose:
+            print(f"Modell geladen: {model_path}")
+
+        # Load Scaler
+        scaler_path = os.path.join(model_dir, 'feature_scaler.pkl')
+        if not os.path.exists(scaler_path):
+            raise FileNotFoundError(f"Scaler not found: {scaler_path}")
+        with open(scaler_path, 'rb') as f:
+            scaler = pickle.load(f)
+        if verbose:
+            print(f"Scaler geladen: {scaler_path}")
+
+        # Load Feature Names
+        feature_names_path = os.path.join(model_dir, 'feature_names.pkl')
+        if not os.path.exists(feature_names_path):
+            raise FileNotFoundError(f"Feature names not found: {feature_names_path}")
+        with open(feature_names_path, 'rb') as f:
+            feature_names = pickle.load(f)
+        if verbose:
+            print(f"Feature Names geladen: {len(feature_names)} features")
+
+        # Load Metadata
+        metadata_path = os.path.join(model_dir, 'metadata.json')
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(f"Metadata not found: {metadata_path}")
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        if verbose:
+            print(f"Metadata geladen:")
+            print(f"  Version: {metadata.get('model_version', 'unknown')}")
+            print(f"  Created: {metadata.get('creation_date', 'unknown')}")
+            print(f"  Classes: {metadata.get('class_names', [])}")
+            print(f"  Features: {metadata.get('n_features', '?')}")
+
+        # Create Feature Extractor instance
+        feature_extractor = SPTFeatureExtractor(dt=0.01)
+
+        if verbose:
+            print("="*80)
+            print("MODELL ERFOLGREICH GELADEN!")
+            print("="*80 + "\n")
+
+        return {
+            'model': model,
+            'scaler': scaler,
+            'feature_extractor': feature_extractor,
+            'metadata': metadata,
+            'feature_names': feature_names
+        }
 
 
 def run_complete_training(
