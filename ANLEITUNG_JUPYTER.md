@@ -210,7 +210,7 @@ print("\n✅ Alle Dateien gespeichert!")
 **Gespeicherte Dateien:**
 - `spt_classifier.keras` - Trainiertes Modell
 - `feature_scaler.pkl` - Für Feature-Normalisierung
-- `feature_names.pkl` - Namen der Features
+- `feature_names.pkl` - Feature-Konfiguration (Physics-Subset + Experimente)
 - `metadata.json` - Konfiguration
 - Plots als PNG
 
@@ -293,48 +293,32 @@ print("✅ Beispiel-Trajektorien visualisiert")
 ```python
 # Cell 10: Inference auf neuer Trajektorie
 
-from tensorflow import keras
-import pickle
-from spt_feature_extractor import SPTFeatureExtractor
-
-# Modell und Scaler laden
-model = keras.models.load_model('./mein_modell/spt_classifier.keras')
-with open('./mein_modell/feature_scaler.pkl', 'rb') as f:
-    scaler = pickle.load(f)
-with open('./mein_modell/feature_names.pkl', 'rb') as f:
-    feature_names = pickle.load(f)
-
-# Feature-Extraktor
-extractor = SPTFeatureExtractor(dt=0.01)
+from predict_trajectories import SPTPredictor
+import numpy as np
 
 # BEISPIEL: Neue Trajektorie (ersetze mit deinen Daten!)
 # trajectory sollte shape (n_steps, 2) oder (n_steps, 3) haben [µm]
 trajectory = generate_normal_diffusion_spt(200, D=0.1, dimensionality='2D')
+D_value = 0.1      # Effektiver Diffusionskoeffizient deiner Messung
+poly_degree = 0.5  # Polymerisationsgrad (0-1)
 
-# Features extrahieren
-features_dict = extractor.extract_all_features(trajectory)
-features_array = np.array([features_dict[name] for name in feature_names]).reshape(1, -1)
-features_norm = scaler.transform(features_array)
+predictor = SPTPredictor('./mein_modell', verbose=False)
+predictions, probabilities = predictor.predict(
+    [trajectory],
+    np.array([D_value]),
+    np.array([poly_degree]),
+    return_probabilities=True
+)
 
-# Trajektorie padden
-max_length = 3000
-traj_padded = np.zeros((1, max_length, 2))
-length = min(len(trajectory), max_length)
-traj_padded[0, :length, :] = trajectory[:length, :]
+class_idx = predictions[0]
+class_name = predictor.class_names[class_idx]
+confidence = probabilities[0, class_idx]
 
-# Prediction
-prediction = model.predict([traj_padded, features_norm], verbose=0)
-
-# Ergebnis
-class_names = ['Normal', 'Subdiffusion', 'Superdiffusion', 'Confined']
-predicted_class = class_names[np.argmax(prediction[0])]
-confidence = np.max(prediction[0])
-
-print(f"\n🎯 PREDICTION:")
-print(f"Klasse: {predicted_class}")
+print("\n🎯 PREDICTION:")
+print(f"Klasse: {class_name}")
 print(f"Confidence: {confidence:.2%}")
-print(f"\nAlle Wahrscheinlichkeiten:")
-for name, prob in zip(class_names, prediction[0]):
+print("\nAlle Wahrscheinlichkeiten:")
+for name, prob in zip(predictor.class_names, probabilities[0]):
     print(f"  {name:15s}: {prob*100:5.2f}%")
 
 # Visualisiere Trajektorie
