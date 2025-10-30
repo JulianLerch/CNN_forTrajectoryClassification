@@ -101,19 +101,22 @@ def iterative_training(
         trainer.train(
             epochs=epochs_per_iteration,
             batch_size=512,
-            learning_rate=3e-4,
-            early_stopping=False,  # No early stopping - run full epochs!
-            verbose=True
+            verbose=1
         )
 
         # Evaluate
         if verbose:
             print(f"\n[Iteration {iteration}] Evaluating...")
 
-        metrics = trainer.evaluate(verbose=True)
+        overall_acc, report, cm = trainer.evaluate(verbose=True)
 
-        overall_acc = metrics['overall_accuracy']
-        per_class_acc = metrics['per_class_accuracy']
+        # Calculate per-class accuracy from confusion matrix
+        per_class_acc = {}
+        for i, class_name in enumerate(trainer.class_names):
+            class_correct = cm[i, i]
+            class_total = cm[i, :].sum()
+            per_class_acc[class_name] = class_correct / class_total if class_total > 0 else 0.0
+
         min_class_acc = min(per_class_acc.values())
 
         if verbose:
@@ -150,7 +153,7 @@ def iterative_training(
                 print("Saving model...")
             trainer.save_model(verbose=True)
 
-            return trainer, metrics, iteration
+            return trainer, None, iteration
 
         # Continue to next iteration with fresh data
         if verbose:
