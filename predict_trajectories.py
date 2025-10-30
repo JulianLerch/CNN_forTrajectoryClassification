@@ -48,7 +48,25 @@ class SPTPredictor:
         self.scaler = loaded['scaler']
         self.feature_extractor = loaded['feature_extractor']
         self.metadata = loaded['metadata']
-        self.feature_names = loaded['feature_names']
+        self.feature_config = loaded['feature_config']
+
+        self.selected_physics_features = self.metadata.get(
+            'selected_physics_features',
+            self.feature_config.get('selected_physics_features', SPTClassifierTrainer.SELECTED_PHYSICS_FEATURES)
+        )
+        self.experimental_features = self.metadata.get(
+            'experimental_features',
+            self.feature_config.get('experimental_features', SPTClassifierTrainer.EXPERIMENTAL_FEATURES)
+        )
+
+        all_physics = self.feature_config.get('all_physics_features', list(self.feature_extractor.feature_names))
+        try:
+            self.selected_physics_indices = [
+                all_physics.index(name) for name in self.selected_physics_features
+            ]
+        except ValueError as exc:
+            missing = [name for name in self.selected_physics_features if name not in all_physics]
+            raise ValueError(f"Missing physics features in extractor: {missing}") from exc
 
         self.class_names = self.metadata['class_names']
         self.max_length = self.metadata['max_length']
@@ -87,40 +105,25 @@ class SPTPredictor:
             print(f"\nPredicting {n_samples} trajectories...")
 
         # 1. Extract physics-based features
-        X_feat = self.feature_extractor.extract_batch(trajectories, n_jobs=-1)
+        physics_matrix = self.feature_extractor.extract_batch(trajectories, n_jobs=-1)
+        physics_selected = physics_matrix[:, self.selected_physics_indices]
 
         # 2. Add experimental features (D, Poly, Dim)
-        D_log = np.log10(D_values).reshape(-1, 1)
+        D_log = np.log10(np.clip(D_values, 1e-12, None)).reshape(-1, 1)
         poly_feat = poly_degrees.reshape(-1, 1)
         dim_feat = np.array([0.0 if traj.shape[1] == 2 else 1.0 for traj in trajectories]).reshape(-1, 1)
 
-        X_feat = np.concatenate([X_feat, D_log, poly_feat, dim_feat], axis=1)
+        X_feat = np.concatenate([physics_selected, D_log, poly_feat, dim_feat], axis=1)
 
         # 3. Scale features
         X_feat_scaled = self.scaler.transform(X_feat)
 
-        # 4. Pad trajectories
-        X_traj_padded = np.zeros((n_samples, self.max_length, self.input_dim), dtype=np.float32)
-
-        for i, traj in enumerate(trajectories):
-            L = len(traj)
-            if L > self.max_length:
-                # Take last max_length points
-                segment = traj[-self.max_length:]
-            else:
-                segment = traj
-
-            # Handle 2D vs 3D
-            if segment.shape[1] < self.input_dim:
-                # Pad 2D to 3D
-                padded = np.zeros((len(segment), self.input_dim), dtype=np.float32)
-                padded[:, :segment.shape[1]] = segment
-                segment = padded
-            elif segment.shape[1] > self.input_dim:
-                segment = segment[:, :self.input_dim]
-
-            length = min(len(segment), self.max_length)
-            X_traj_padded[i, :length, :] = segment[:length]
+        # 4. Normierte Trajektorien vorbereiten
+        X_traj_padded = SPTClassifierTrainer.preprocess_trajectories(
+            trajectories,
+            self.max_length,
+            self.input_dim
+        )
 
         # 5. Predict
         probabilities = self.model.predict([X_traj_padded, X_feat_scaled], verbose=0)

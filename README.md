@@ -333,7 +333,7 @@ Nach dem Training werden folgende Dateien erstellt:
 spt_trained_model/
 ├── spt_classifier.keras       # Trainiertes Modell (Keras-Format)
 ├── feature_scaler.pkl         # StandardScaler für Features
-├── feature_names.pkl          # Namen der 24 Features
+├── feature_names.pkl          # Feature-Konfiguration (Physics-Subset + Experimente)
 ├── metadata.json              # Modell-Konfiguration
 ├── training_history.pkl       # Loss/Accuracy pro Epoche
 ├── training_history.png       # Training Plots
@@ -654,50 +654,36 @@ model = keras.models.load_model('spt_trained_model/spt_classifier.keras')
 with open('spt_trained_model/feature_scaler.pkl', 'rb') as f:
     scaler = pickle.load(f)
 
-# 3. Feature-Namen laden
+# 3. Feature-Konfiguration laden
 with open('spt_trained_model/feature_names.pkl', 'rb') as f:
-    feature_names = pickle.load(f)
+    feature_config = pickle.load(f)
+selected_features = feature_config['selected_physics_features']
 ```
 
 ### Prediction auf neuer Trajektorie
 
 ```python
-from spt_feature_extractor import SPTFeatureExtractor
+from predict_trajectories import SPTPredictor
 
-# Feature-Extraktor initialisieren
-extractor = SPTFeatureExtractor(dt=0.01)
+# Neue Trajektorie (n_steps, 2 oder 3) [µm]
+trajectory = np.array([...])
+D_value = 0.05          # Effektiver Diffusionskoeffizient Ihres Experiments
+poly_degree = 0.5       # Polymerisationsgrad (0-1)
 
-# Neue Trajektorie (z.B. aus Ihrem Experiment)
-# trajectory: (n_steps, 2 oder 3) numpy array [µm]
-trajectory = np.array([...])  # Ihre Daten
+predictor = SPTPredictor('spt_trained_model', verbose=False)
+predictions, probabilities = predictor.predict(
+    [trajectory],
+    np.array([D_value]),
+    np.array([poly_degree]),
+    return_probabilities=True
+)
 
-# Features extrahieren
-features_dict = extractor.extract_all_features(trajectory)
-features_array = np.array([features_dict[name] for name in feature_names])
-features_array = features_array.reshape(1, -1)
+class_idx = predictions[0]
+class_name = predictor.class_names[class_idx]
+confidence = probabilities[0, class_idx]
 
-# Features normalisieren
-features_norm = scaler.transform(features_array)
-
-# Trajektorie padden
-max_length = 3000
-traj_padded = np.zeros((1, max_length, 2))  # oder 3 für 3D
-length = min(len(trajectory), max_length)
-traj_padded[0, :length, :] = trajectory[:length, :]
-
-# Prediction
-prediction = model.predict([traj_padded, features_norm], verbose=0)
-
-# Ergebnis
-class_names = ['Normal', 'Subdiffusion', 'Superdiffusion', 'Confined']
-predicted_class = class_names[np.argmax(prediction[0])]
-confidence = np.max(prediction[0])
-
-print(f"Predicted: {predicted_class}")
+print(f"Predicted: {class_name}")
 print(f"Confidence: {confidence:.2%}")
-print(f"\nAll Probabilities:")
-for name, prob in zip(class_names, prediction[0]):
-    print(f"  {name:15s}: {prob:.2%}")
 ```
 
 ---
