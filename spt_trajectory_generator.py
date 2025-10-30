@@ -547,60 +547,84 @@ def generate_spt_dataset(
     dt: float = 0.01,
     localization_precision: float = 0.015,
     boost_classes: Optional[List[str]] = None,
-    verbose: bool = True
-) -> Tuple[List[np.ndarray], np.ndarray, np.ndarray, List[str]]:
+    verbose: bool = True,
+    use_full_D_range: bool = True,
+    augment_polymerization: bool = True
+) -> Tuple[List[np.ndarray], np.ndarray, np.ndarray, List[str], np.ndarray, np.ndarray]:
     """
     Generiere vollstÃ¤ndigen wissenschaftlichen SPT-Datensatz
-    
+
     Generiert synthetische SPT-Trajektorien fÃ¼r Training eines Deep-Learning-Klassifikators
     mit physikalisch korrekten Parametern fÃ¼r TDI-G0 in Polymermatrizen.
-    
+
     Args:
         n_samples_per_class: Basis-Anzahl pro Klasse
         min_length: Minimale Trajektorien-LÃ¤nge [Frames]
         max_length: Maximale Trajektorien-LÃ¤nge [Frames]
         dimensionality: '2D' oder '3D'
         polymerization_degree: 0.0-1.0 (Eduktschmelze bis vollpolymerisiert)
+                              Nur verwendet wenn augment_polymerization=False
         dt: Zeitschritt [s], typisch: 0.01s = 10ms
         localization_precision: Ïƒ_loc [Âµm], typisch: 15nm = 0.015Âµm
         boost_classes: Liste von Klassen zum Boosten (z.B. ['Normal', 'Confined'])
         verbose: Print-Output?
-        
+        use_full_D_range: Wenn True, nutze vollen D-Bereich (1e-4 bis 3.0) statt eingeschränkt
+        augment_polymerization: Wenn True, sample zufällige Polymerisierungsgrade (0-1) für jede Trajektorie
+
     Returns:
         X: Liste von Trajektorien [Âµm] (variable LÃ¤ngen!)
         y: Labels (0=Normal, 1=Sub, 2=Super, 3=Confined)
         lengths: Trajektorien-LÃ¤ngen
         class_names: Klassennamen
-        
+        D_values: Verwendete D-Werte für jede Trajektorie [µm²/s]
+        poly_degrees: Verwendete Polymerisierungsgrade für jede Trajektorie [0-1]
+
     Physikalische Parameter (TDI-G0 in Polymer):
     ---------------------------------------------
-    basierend auf polymerization_degree:
-    
+    Mit use_full_D_range=True und augment_polymerization=True (NEU!):
+    - D âˆˆ [1e-4, 3.0] ÂµmÂ²/s  (VOLLER Bereich, alle Polymer-Zustände!)
+    - Polymerisierungsgrad âˆˆ [0.0, 1.0] (zufällig pro Trajektorie)
+
+    Klassisch (use_full_D_range=False):
     - Niedrig (0-30%): D âˆˆ [0.05, 0.8] ÂµmÂ²/s  (flÃ¼ssig)
     - Mittel (30-70%): D âˆˆ [0.01, 0.2] ÂµmÂ²/s  (viskoelastisch)
     - Hoch (70-100%): D âˆˆ [0.001, 0.05] ÂµmÂ²/s (fest, glasig)
     """
     class_names = ['Normal', 'Subdiffusion', 'Superdiffusion', 'Confined']
-    
+
     if boost_classes is None:
         # Standard: keine künstliche Klassengewichtung –
         # gleich viele Trajektorien pro Diffusionstyp
         boost_classes = []
-    
-    # D-Bereich basierend auf Polymerisierung
-    D_min, D_max = PolymerDiffusionParameters.get_D_range(polymerization_degree)
-    
+
+    # D-Bereich: VOLL oder eingeschränkt basierend auf Polymerisierung
+    if use_full_D_range:
+        # VOLLER D-Bereich: Alle Polymerisierungsgrade abdecken!
+        D_min = 1e-4
+        D_max = 3.0 if dimensionality == '2D' else 3.0
+    else:
+        # Klassisch: Eingeschränkt auf Polymerisierungsgrad
+        D_min, D_max = PolymerDiffusionParameters.get_D_range(polymerization_degree)
+
     X = []
     y = []
     lengths = []
+    D_values = []
+    poly_degrees = []
     
     if verbose:
         print("="*80)
-        print("ðŸ”¬ WISSENSCHAFTLICHE SPT-TRAJEKTORIEN-GENERIERUNG")
+        print("WISSENSCHAFTLICHE SPT-TRAJEKTORIEN-GENERIERUNG")
         print("="*80)
         print(f"DimensionalitÃ¤t: {dimensionality}")
-        print(f"Polymerisierungsgrad: {polymerization_degree:.1%}")
-        print(f"D-Bereich: {D_min:.3f} - {D_max:.3f} ÂµmÂ²/s")
+        if augment_polymerization:
+            print(f"Polymerisierungsgrad: AUGMENTIERT (0-100% zufällig pro Trajektorie)")
+        else:
+            print(f"Polymerisierungsgrad: {polymerization_degree:.1%} (fix)")
+        if use_full_D_range:
+            print(f"D-Bereich: {D_min:.4f} - {D_max:.3f} ÂµmÂ²/s (VOLLER BEREICH!)")
+        else:
+            print(f"D-Bereich: {D_min:.3f} - {D_max:.3f} ÂµmÂ²/s")
         print(f"Zeitschritt dt: {dt} s")
         print(f"Lokalisierungs-Precision: {localization_precision*1000:.1f} nm")
         print(f"Trajektorien-LÃ¤nge: {min_length} - {max_length} Frames")
@@ -619,21 +643,31 @@ def generate_spt_dataset(
     for i in range(n_normal):
         if verbose and i % 1000 == 0:
             print(f"   {i}/{n_normal}", end='\r')
-        
+
         n_steps = np.random.randint(min_length, max_length + 1)
-        D = np.random.uniform(D_min, D_max)
-        
+
+        # Sample D from FULL range (log-uniform for better coverage)
+        D = np.power(10, np.random.uniform(np.log10(D_min), np.log10(D_max)))
+
+        # Sample polymerization degree if augmentation is enabled
+        if augment_polymerization:
+            poly_deg = np.random.uniform(0.0, 1.0)
+        else:
+            poly_deg = polymerization_degree
+
         traj = generate_normal_diffusion_spt(
             n_steps, D=D, dt=dt, dimensionality=dimensionality,
             localization_precision=localization_precision
         )
-        
+
         X.append(traj)
         y.append(0)
         lengths.append(n_steps)
+        D_values.append(D)
+        poly_degrees.append(poly_deg)
     
     if verbose:
-        print(f"   âœ… {n_normal} Normal generiert\n")
+        print(f"   {n_normal} Normal generiert\n")
     
     # === KLASSE 1: SUBDIFFUSION ===
     n_sub = n_samples_per_class * 2 if 'Subdiffusion' in boost_classes else n_samples_per_class
@@ -646,32 +680,40 @@ def generate_spt_dataset(
     for i in range(n_sub):
         if verbose and i % 1000 == 0:
             print(f"   {i}/{n_sub}", end='\r')
-        
+
         n_steps = np.random.randint(min_length, max_length + 1)
-        
+
         # Î± mit Bias zu niedrigen Werten (Crowding ist hÃ¤ufiger als schwache Subdiffusion)
         if np.random.rand() < 0.6:
             alpha = np.random.uniform(0.35, 0.65)  # Starkes Crowding
         else:
             alpha = np.random.uniform(0.65, 0.90)  # Schwaches Crowding
-        
-        # D_Î± unabhÃ¤ngig von Î± (wichtig!)
-        D_alpha = np.random.uniform(D_min * 0.5, D_max * 0.6)
-        
+
+        # D_Î± log-uniform über VOLLEN Bereich (wichtig!)
+        D_alpha = np.power(10, np.random.uniform(np.log10(D_min * 0.5), np.log10(D_max * 0.8)))
+
+        # Sample polymerization degree if augmentation is enabled
+        if augment_polymerization:
+            poly_deg = np.random.uniform(0.0, 1.0)
+        else:
+            poly_deg = polymerization_degree
+
         mechanism = np.random.choice(['fbm', 'obstacles'], p=[0.7, 0.3])
-        
+
         traj = generate_subdiffusion_spt(
             n_steps, alpha=alpha, D_alpha=D_alpha, dt=dt,
             dimensionality=dimensionality, localization_precision=localization_precision,
             mechanism=mechanism
         )
-        
+
         X.append(traj)
         y.append(1)
         lengths.append(n_steps)
+        D_values.append(D_alpha)
+        poly_degrees.append(poly_deg)
     
     if verbose:
-        print(f"   âœ… {n_sub} Subdiffusion generiert\n")
+        print(f"   {n_sub} Subdiffusion generiert\n")
     
     # === KLASSE 2: SUPERDIFFUSION ===
     n_super = n_samples_per_class * 2 if 'Superdiffusion' in boost_classes else n_samples_per_class
@@ -684,26 +726,35 @@ def generate_spt_dataset(
     for i in range(n_super):
         if verbose and i % 1000 == 0:
             print(f"   {i}/{n_super}", end='\r')
-        
+
         n_steps = np.random.randint(min_length, max_length + 1)
-        
+
         alpha = np.random.uniform(1.15, 1.80)
-        D_alpha = np.random.uniform(D_min * 0.8, D_max * 1.2)
-        
+        # D_Î± log-uniform über VOLLEN Bereich
+        D_alpha = np.power(10, np.random.uniform(np.log10(D_min * 0.8), np.log10(D_max * 1.2)))
+
+        # Sample polymerization degree if augmentation is enabled
+        if augment_polymerization:
+            poly_deg = np.random.uniform(0.0, 1.0)
+        else:
+            poly_deg = polymerization_degree
+
         mode = 'persistent' if np.random.rand() > 0.25 else 'levy'
-        
+
         traj = generate_superdiffusion_spt(
             n_steps, alpha=alpha, D_alpha=D_alpha, dt=dt,
             dimensionality=dimensionality, localization_precision=localization_precision,
             mode=mode
         )
-        
+
         X.append(traj)
         y.append(2)
         lengths.append(n_steps)
+        D_values.append(D_alpha)
+        poly_degrees.append(poly_deg)
     
     if verbose:
-        print(f"   âœ… {n_super} Superdiffusion generiert\n")
+        print(f"   {n_super} Superdiffusion generiert\n")
     
     # === KLASSE 3: CONFINED ===
     n_conf = n_samples_per_class * 2 if 'Confined' in boost_classes else n_samples_per_class
@@ -717,87 +768,107 @@ def generate_spt_dataset(
     for i in range(n_conf):
         if verbose and i % 1000 == 0:
             print(f"   {i}/{n_conf}", end='\r')
-        
+
         n_steps = np.random.randint(min_length, max_length + 1)
-        
+
         # Confinement-Radius: realistisch fÃ¼r Polymer-MikrodomÃ¤nen
         confinement_radius = np.random.uniform(0.2, 2.0)  # Âµm
-        
-        # D im Confinement (oft niedriger)
-        D_conf = np.random.uniform(D_min, D_max * 0.5)
-        
+
+        # D im Confinement - log-uniform über VOLLEN Bereich
+        D_conf = np.power(10, np.random.uniform(np.log10(D_min), np.log10(D_max * 0.8)))
+
+        # Sample polymerization degree if augmentation is enabled
+        if augment_polymerization:
+            poly_deg = np.random.uniform(0.0, 1.0)
+        else:
+            poly_deg = polymerization_degree
+
         geometry = np.random.choice(['spherical', 'cubic'], p=[0.7, 0.3])
-        
+
         # 30% subdiffusive confined
         alpha_conf = None
         if np.random.rand() < 0.3:
             alpha_conf = np.random.uniform(0.6, 0.9)
-        
+
         traj = generate_confined_diffusion_spt(
             n_steps, confinement_radius=confinement_radius, D=D_conf, dt=dt,
             dimensionality=dimensionality, geometry=geometry,
             alpha_confined=alpha_conf, localization_precision=localization_precision
         )
-        
+
         X.append(traj)
         y.append(3)
         lengths.append(n_steps)
+        D_values.append(D_conf)
+        poly_degrees.append(poly_deg)
     
     if verbose:
-        print(f"   âœ… {n_conf} Confined generiert\n")
+        print(f"   {n_conf} Confined generiert\n")
     
     y = np.array(y)
     lengths = np.array(lengths)
-    
+    D_values = np.array(D_values)
+    poly_degrees = np.array(poly_degrees)
+
     if verbose:
         print("="*80)
-        print("âœ… DATENSATZ VOLLSTÃ„NDIG!")
+        print("DATENSATZ VOLLSTÃ„NDIG!")
         print("="*80)
         print(f"Gesamt-Samples: {len(X)}")
         print(f"Dimensionen: {X[0].shape[1]}D")
         print(f"Trajektorien-LÃ¤ngen: {lengths.min()} - {lengths.max()} Frames")
         print(f"Mittlere LÃ¤nge: {lengths.mean():.1f} Â± {lengths.std():.1f} Frames")
+        print(f"D-Bereich: {D_values.min():.4f} - {D_values.max():.3f} ÂµmÂ²/s")
+        print(f"D-Mittelwert (log): {np.mean(np.log10(D_values)):.2f} (10^x)")
+        print(f"Polymerisierungsgrad: {poly_degrees.min():.2f} - {poly_degrees.max():.2f}")
         print(f"\nKlassen-Verteilung:")
         for i, name in enumerate(class_names):
             count = np.sum(y == i)
             percentage = 100 * count / len(y)
             avg_len = lengths[y == i].mean()
-            print(f"  {name:15s}: {count:6d} ({percentage:5.1f}%) - Ã˜ {avg_len:.0f} Frames")
+            avg_D = np.mean(D_values[y == i])
+            avg_poly = np.mean(poly_degrees[y == i])
+            print(f"  {name:15s}: {count:6d} ({percentage:5.1f}%) - Ã˜ {avg_len:.0f} Frames, Ã˜ D={avg_D:.4f}, Ã˜ Poly={avg_poly:.2f}")
         print("="*80 + "\n")
-    
-    return X, y, lengths, class_names
+
+    return X, y, lengths, class_names, D_values, poly_degrees
 
 
 if __name__ == "__main__":
     # Test-Generation
-    print("\nðŸ§ª TEST: Wissenschaftliche SPT-Trajektorien")
+    print("\nTEST: Wissenschaftliche SPT-Trajektorien")
     print("="*80)
     
     # 2D Test
-    X_2d, y_2d, lengths_2d, names = generate_spt_dataset(
+    X_2d, y_2d, lengths_2d, names, D_2d, poly_2d = generate_spt_dataset(
         n_samples_per_class=10000,
         min_length=50,
         max_length=5000,
         dimensionality='2D',
         polymerization_degree=0.5,
-        verbose=True
+        verbose=True,
+        use_full_D_range=True,
+        augment_polymerization=True
     )
-    
-    print(f"\nâœ… 2D Datensatz: {len(X_2d)} Trajektorien")
+
+    print(f"\n2D Datensatz: {len(X_2d)} Trajektorien")
     print(f"   Beispiel-Shape: {X_2d[0].shape}")
-    
+    print(f"   D-Range: {D_2d.min():.4f} - {D_2d.max():.3f}")
+
     # 3D Test
     print("\n" + "="*80)
-    X_3d, y_3d, lengths_3d, _ = generate_spt_dataset(
+    X_3d, y_3d, lengths_3d, _, D_3d, poly_3d = generate_spt_dataset(
         n_samples_per_class=10000,
         min_length=50,
         max_length=5000,
         dimensionality='3D',
         polymerization_degree=0.5,
-        verbose=True
+        verbose=True,
+        use_full_D_range=True,
+        augment_polymerization=True
     )
     
-    print(f"\nâœ… 3D Datensatz: {len(X_3d)} Trajektorien")
+    print(f"\n3D Datensatz: {len(X_3d)} Trajektorien")
     print(f"   Beispiel-Shape: {X_3d[0].shape}")
     
     print("\n" + "="*80)

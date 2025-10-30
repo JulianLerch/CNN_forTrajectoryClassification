@@ -48,14 +48,14 @@ class TrainingApp:
         self.training_thread: threading.Thread | None = None
         self.trainer: SPTClassifierTrainer | None = None
 
-        # GUI-States
-        self.samples_var = tk.IntVar(value=500)
-        self.mode_var = tk.StringVar(value="both")
-        self.ratio_var = tk.DoubleVar(value=0.5)
-        self.poly_var = tk.DoubleVar(value=0.5)
-        self.epochs_var = tk.IntVar(value=60)
-        self.batch_var = tk.IntVar(value=128)
-        self.max_len_var = tk.IntVar(value=600)
+        # GUI-States (OPTIMIERT für "Press Start & Go"!)
+        self.samples_var = tk.IntVar(value=10000)  # Erhöht: 500 -> 10000
+        self.mode_var = tk.StringVar(value="both")  # 2D+3D für beste Generalisierung
+        self.ratio_var = tk.DoubleVar(value=0.5)    # 50/50 2D/3D
+        self.poly_var = tk.DoubleVar(value=0.5)     # Wird durch Augmentation überschrieben
+        self.epochs_var = tk.IntVar(value=100)      # Erhöht: 60 -> 100
+        self.batch_var = tk.IntVar(value=512)       # Erhöht: 128 -> 512 (schneller!)
+        self.max_len_var = tk.IntVar(value=500)     # Optimiert: 600 -> 500
         default_output = Path("./spt_trained_model_app").resolve()
         self.output_dir_var = tk.StringVar(value=str(default_output))
 
