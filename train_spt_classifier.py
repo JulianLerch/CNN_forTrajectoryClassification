@@ -277,27 +277,51 @@ class SPTClassifierTrainer:
             print("  â€¢ Confinement (Trappedness, Radius Ratio)")
             print("="*80 + "\n")
         
-        X_feat = self.feature_extractor.extract_batch(X_traj_list)
+        X_feat_all = self.feature_extractor.extract_batch(X_traj_list)
 
-        # Füge D-Werte, Polymerisierungsgrad und Dimensionalität als zusätzliche Features hinzu
-        # Diese erweitern die 24 physikalischen Features
-        D_log = np.log10(D_values).reshape(-1, 1)  # Log-transformiert für bessere Skalierung
-        poly_feat = poly_degrees.reshape(-1, 1)
+        # === FEATURE SELECTION: Top 10 wichtigste Features ===
+        # Reduzierung von 24 auf 7 Physics Features + 3 Experimental = 10 Total
+        # Verhindert Curse of Dimensionality!
 
-        # Dimensionalität als Feature: 0 für 2D, 1 für 3D
-        dim_feat = np.array([0.0 if traj.shape[1] == 2 else 1.0 for traj in X_traj_list]).reshape(-1, 1)
+        feature_names_all = list(self.feature_extractor.feature_names)
 
-        # Kombiniere alle Features
-        X_feat = np.concatenate([X_feat, D_log, poly_feat, dim_feat], axis=1)
+        # Top 7 Physics Features für Diffusionsklassifikation:
+        selected_physics_features = [
+            'msd_alpha',              # 1. DER wichtigste - direkter α Indikator
+            'msd_D_eff',              # 2. Effektiver Diffusionskoeffizient
+            'msd_linearity',          # 3. Linear vs non-linear MSD
+            'radius_of_gyration',     # 4. Räumliche Ausdehnung
+            'straightness',           # 5. Direktheit der Bewegung
+            'gaussianity',            # 6. Brownian vs non-Brownian
+            'trappedness'             # 7. Confinement detection
+        ]
+
+        # Finde Indizes der ausgewählten Features
+        selected_indices = [feature_names_all.index(name) for name in selected_physics_features if name in feature_names_all]
+        X_feat = X_feat_all[:, selected_indices]
+
+        # Füge 3 experimentelle Features hinzu
+        D_log = np.log10(D_values).reshape(-1, 1)  # 8. Input D-Wert
+        # poly_feat wird NICHT mehr verwendet - durch Augmentation irrelevant
+        dim_feat = np.array([0.0 if traj.shape[1] == 2 else 1.0 for traj in X_traj_list]).reshape(-1, 1)  # 9. 2D vs 3D
+
+        # Kombiniere: 7 Physics + 2 Experimental = 9 Features
+        # (Polymerisierung weg gelassen - macht mit Augmentation keinen Sinn)
+        X_feat = np.concatenate([X_feat, D_log, dim_feat], axis=1)
 
         self.n_features = X_feat.shape[1]
+        self.selected_feature_names = selected_physics_features + ['D_log10', 'dimensionality']
+
         if verbose:
             print(f"\nFeature-Matrix: {X_feat.shape}")
-            print(f"   Basis-Features: 24")
-            print(f"   + D-Wert (log10): 1")
-            print(f"   + Polymerisierungsgrad: 1")
-            print(f"   + Dimensionalität (2D/3D): 1")
-            print(f"   = Gesamt: {X_feat.shape[1]} Features pro Sample")
+            print(f"   === FEATURE SELECTION: Top 9 Features ===")
+            print(f"   Physics Features (7):")
+            for i, name in enumerate(selected_physics_features, 1):
+                print(f"     {i}. {name}")
+            print(f"   Experimental Features (2):")
+            print(f"     8. D_log10 (input diffusion coefficient)")
+            print(f"     9. dimensionality (2D/3D)")
+            print(f"   TOTAL: {self.n_features} features (reduced from 27!)")
         
         # Padding der Trajektorien
         if verbose:

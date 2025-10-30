@@ -597,14 +597,16 @@ def generate_spt_dataset(
         # gleich viele Trajektorien pro Diffusionstyp
         boost_classes = []
 
-    # D-Bereich: VOLL oder eingeschränkt basierend auf Polymerisierung
+    # D-Bereich: KORRIGIERT basierend auf realen Polymer-Diffusionswerten
+    # Normal Diffusion: ~2.45 µm²/s (Monomer) → <1e-4 µm²/s (vollpolymerisiert)
     if use_full_D_range:
-        # VOLLER D-Bereich: Alle Polymerisierungsgrade abdecken!
-        D_min = 1e-4
-        D_max = 3.0 if dimensionality == '2D' else 3.0
+        # PHYSIKALISCH KORREKTER D-Bereich für jede Klasse
+        # Diese werden später pro Klasse angepasst
+        D_min_base = 1e-4   # Minimum für vollpolymerisiert
+        D_max_base = 2.5    # Maximum für Monomer (Normal Diffusion)
     else:
         # Klassisch: Eingeschränkt auf Polymerisierungsgrad
-        D_min, D_max = PolymerDiffusionParameters.get_D_range(polymerization_degree)
+        D_min_base, D_max_base = PolymerDiffusionParameters.get_D_range(polymerization_degree)
 
     X = []
     y = []
@@ -622,9 +624,14 @@ def generate_spt_dataset(
         else:
             print(f"Polymerisierungsgrad: {polymerization_degree:.1%} (fix)")
         if use_full_D_range:
-            print(f"D-Bereich: {D_min:.4f} - {D_max:.3f} ÂµmÂ²/s (VOLLER BEREICH!)")
+            print(f"D-Bereich (Normal): {D_min_base:.4f} - {D_max_base:.3f} µm²/s")
+            print(f"D-Bereiche pro Klasse werden automatisch angepasst:")
+            print(f"  Normal: {D_min_base:.4f} - {D_max_base:.1f} µm²/s")
+            print(f"  Super:  {D_min_base*2:.4f} - {D_max_base*1.2:.1f} µm²/s (schneller)")
+            print(f"  Sub:    {D_min_base*0.5:.5f} - {D_max_base*0.8:.1f} µm²/s (langsamer)")
+            print(f"  Confined: {D_min_base*0.1:.5f} - {D_max_base*0.6:.1f} µm²/s (am langsamsten)")
         else:
-            print(f"D-Bereich: {D_min:.3f} - {D_max:.3f} ÂµmÂ²/s")
+            print(f"D-Bereich: {D_min_base:.3f} - {D_max_base:.3f} µm²/s")
         print(f"Zeitschritt dt: {dt} s")
         print(f"Lokalisierungs-Precision: {localization_precision*1000:.1f} nm")
         print(f"Trajektorien-LÃ¤nge: {min_length} - {max_length} Frames")
@@ -634,12 +641,16 @@ def generate_spt_dataset(
     
     # === KLASSE 0: NORMAL ===
     n_normal = n_samples_per_class * 2 if 'Normal' in boost_classes else n_samples_per_class
-    
+
+    # Normal Diffusion: ~2.5 µm²/s (Monomer) → ~1e-4 µm²/s (vollpolymerisiert)
+    D_min_normal = D_min_base      # 1e-4
+    D_max_normal = D_max_base      # 2.5
+
     if verbose:
-        print(f"ðŸ“Š [1/4] Generiere Normal Diffusion (n={n_normal})...")
-        print(f"   Î± = 1.0 (Einstein-Smoluchowski)")
-        print(f"   D = {D_min:.3f} - {D_max:.3f} ÂµmÂ²/s")
-    
+        print(f"[1/4] Generiere Normal Diffusion (n={n_normal})...")
+        print(f"   α = 1.0 (Einstein-Smoluchowski)")
+        print(f"   D = {D_min_normal:.4f} - {D_max_normal:.1f} µm²/s")
+
     for i in range(n_normal):
         if verbose and i % 1000 == 0:
             print(f"   {i}/{n_normal}", end='\r')
@@ -647,7 +658,7 @@ def generate_spt_dataset(
         n_steps = np.random.randint(min_length, max_length + 1)
 
         # Sample D from FULL range (log-uniform for better coverage)
-        D = np.power(10, np.random.uniform(np.log10(D_min), np.log10(D_max)))
+        D = np.power(10, np.random.uniform(np.log10(D_min_normal), np.log10(D_max_normal)))
 
         # Sample polymerization degree if augmentation is enabled
         if augment_polymerization:
@@ -671,26 +682,30 @@ def generate_spt_dataset(
     
     # === KLASSE 1: SUBDIFFUSION ===
     n_sub = n_samples_per_class * 2 if 'Subdiffusion' in boost_classes else n_samples_per_class
-    
+
+    # Subdiffusion: etwas langsamer als Normal
+    D_min_sub = D_min_base * 0.5  # 5e-5
+    D_max_sub = D_max_base * 0.8  # 2.0
+
     if verbose:
-        print(f"ðŸ“Š [2/4] Generiere Subdiffusion (n={n_sub})...")
-        print(f"   Î± = 0.3 - 0.9 (fraktionale Brownsche Bewegung)")
-        print(f"   D_Î± = {D_min*0.5:.3f} - {D_max*0.6:.3f} ÂµmÂ²/s^Î±")
-    
+        print(f"[2/4] Generiere Subdiffusion (n={n_sub})...")
+        print(f"   α = 0.3 - 0.9 (fraktionale Brownsche Bewegung)")
+        print(f"   D_α = {D_min_sub:.5f} - {D_max_sub:.1f} µm²/s^α")
+
     for i in range(n_sub):
         if verbose and i % 1000 == 0:
             print(f"   {i}/{n_sub}", end='\r')
 
         n_steps = np.random.randint(min_length, max_length + 1)
 
-        # Î± mit Bias zu niedrigen Werten (Crowding ist hÃ¤ufiger als schwache Subdiffusion)
+        # α mit Bias zu niedrigen Werten (Crowding ist häufiger als schwache Subdiffusion)
         if np.random.rand() < 0.6:
             alpha = np.random.uniform(0.35, 0.65)  # Starkes Crowding
         else:
             alpha = np.random.uniform(0.65, 0.90)  # Schwaches Crowding
 
-        # D_Î± log-uniform über VOLLEN Bereich (wichtig!)
-        D_alpha = np.power(10, np.random.uniform(np.log10(D_min * 0.5), np.log10(D_max * 0.8)))
+        # D_α log-uniform über Subdiffusions-Bereich
+        D_alpha = np.power(10, np.random.uniform(np.log10(D_min_sub), np.log10(D_max_sub)))
 
         # Sample polymerization degree if augmentation is enabled
         if augment_polymerization:
@@ -717,12 +732,16 @@ def generate_spt_dataset(
     
     # === KLASSE 2: SUPERDIFFUSION ===
     n_super = n_samples_per_class * 2 if 'Superdiffusion' in boost_classes else n_samples_per_class
-    
+
+    # Superdiffusion: etwas schneller als Normal
+    D_min_super = D_min_base * 2.0  # 2e-4
+    D_max_super = D_max_base * 1.2  # 3.0
+
     if verbose:
-        print(f"ðŸ“Š [3/4] Generiere Superdiffusion (n={n_super})...")
-        print(f"   Î± = 1.2 - 1.8 (persistent/LÃ©vy)")
-        print(f"   D_Î± = {D_min*0.8:.3f} - {D_max*1.2:.3f} ÂµmÂ²/s^Î±")
-    
+        print(f"[3/4] Generiere Superdiffusion (n={n_super})...")
+        print(f"   α = 1.2 - 1.8 (persistent/Lévy)")
+        print(f"   D_α = {D_min_super:.4f} - {D_max_super:.1f} µm²/s^α")
+
     for i in range(n_super):
         if verbose and i % 1000 == 0:
             print(f"   {i}/{n_super}", end='\r')
@@ -730,8 +749,8 @@ def generate_spt_dataset(
         n_steps = np.random.randint(min_length, max_length + 1)
 
         alpha = np.random.uniform(1.15, 1.80)
-        # D_Î± log-uniform über VOLLEN Bereich
-        D_alpha = np.power(10, np.random.uniform(np.log10(D_min * 0.8), np.log10(D_max * 1.2)))
+        # D_α log-uniform über Superdiffusions-Bereich
+        D_alpha = np.power(10, np.random.uniform(np.log10(D_min_super), np.log10(D_max_super)))
 
         # Sample polymerization degree if augmentation is enabled
         if augment_polymerization:
@@ -758,24 +777,28 @@ def generate_spt_dataset(
     
     # === KLASSE 3: CONFINED ===
     n_conf = n_samples_per_class * 2 if 'Confined' in boost_classes else n_samples_per_class
-    
+
+    # Confined Diffusion: am langsamsten (wegen räumlicher Begrenzung)
+    D_min_conf = D_min_base * 0.1  # 1e-5
+    D_max_conf = D_max_base * 0.6  # 1.5
+
     if verbose:
-        print(f"ðŸ“Š [4/4] Generiere Confined Diffusion (n={n_conf})...")
-        print(f"   Confinement-Radius: 0.2 - 2.0 Âµm")
-        print(f"   D (im Confinement): {D_min:.3f} - {D_max*0.5:.3f} ÂµmÂ²/s")
-        print(f"   30% subdiffusive confined (Î±=0.6-0.9)")
-    
+        print(f"[4/4] Generiere Confined Diffusion (n={n_conf})...")
+        print(f"   Confinement-Radius: 0.2 - 2.0 µm")
+        print(f"   D (im Confinement): {D_min_conf:.5f} - {D_max_conf:.1f} µm²/s")
+        print(f"   30% subdiffusive confined (α=0.6-0.9)")
+
     for i in range(n_conf):
         if verbose and i % 1000 == 0:
             print(f"   {i}/{n_conf}", end='\r')
 
         n_steps = np.random.randint(min_length, max_length + 1)
 
-        # Confinement-Radius: realistisch fÃ¼r Polymer-MikrodomÃ¤nen
-        confinement_radius = np.random.uniform(0.2, 2.0)  # Âµm
+        # Confinement-Radius: realistisch für Polymer-Mikrodomänen
+        confinement_radius = np.random.uniform(0.2, 2.0)  # µm
 
-        # D im Confinement - log-uniform über VOLLEN Bereich
-        D_conf = np.power(10, np.random.uniform(np.log10(D_min), np.log10(D_max * 0.8)))
+        # D im Confinement - log-uniform über Confined-Bereich (am langsamsten!)
+        D_conf = np.power(10, np.random.uniform(np.log10(D_min_conf), np.log10(D_max_conf)))
 
         # Sample polymerization degree if augmentation is enabled
         if augment_polymerization:

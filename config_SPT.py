@@ -148,9 +148,9 @@ DT_MAX = 0.1     # 100 ms (langsames Tracking)
 # FÃ¼r Training
 DT = 0.01  # s (10 ms frame rate)
 
-# Trajektorien-LÃ¤ngen [Frames]
-TRAJECTORY_LENGTH_MIN = 30      # Minimum fÃ¼r MSD-Fit
-TRAJECTORY_LENGTH_MAX = 5000    # Lange Tracks fÃ¼r Statistik
+# Trajektorien-Längen [Frames] (OPTIMIERT: 30-500 für schnellere Verarbeitung!)
+TRAJECTORY_LENGTH_MIN = 30      # Minimum für MSD-Fit
+TRAJECTORY_LENGTH_MAX = 500     # 500 statt 5000 - viel schneller!
 
 # Lokalisierungs-Precision [Âµm]
 # AbhÃ¤ngig von Photon-Zahl, Pixel-GrÃ¶ÃŸe, etc.
@@ -168,8 +168,8 @@ ASTIGMATISM_CALIBRATION = {
 # 7. DATENGENERIERUNGS-PARAMETER
 # =============================================================================
 
-# Anzahl Samples pro Klasse (ERHÖHT für bessere Generalisierung!)
-N_SAMPLES_PER_CLASS = 10000  # War 5000, jetzt 10000 für robusteres Training
+# Anzahl Samples pro Klasse (OPTIMIERT für schnelle Iterationen!)
+N_SAMPLES_PER_CLASS = 2000  # Kleiner für schnellere Epochen, aber viele Iterationen!
 
 # Class Balance
 CLASS_WEIGHTS = {
