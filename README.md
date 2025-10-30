@@ -368,7 +368,10 @@ python build_desktop_app.py --onefile --windowed
 
 Das Skript erzeugt im Verzeichnis `dist/` eine ausführbare Datei (`SPTTrainerApp`), die du wie ein klassisches Desktop-Programm
 starten kannst. Über `--onedir` erhältst du alternativ einen Ordner mit allen Abhängigkeiten; `--clean` entfernt vorab alte
-Build-Artefakte.
+Build-Artefakte. Damit keine Konflikte zwischen mehreren Qt-Bindings auftreten, werden PyQt/PySide-Pakete standardmäßig aus dem
+Build ausgeschlossen. Falls du gezielt eine Qt-Abhängigkeit benötigst, starte den Befehl mit `--keep-qt` und stelle sicher, dass
+nicht mehrere unterschiedliche Qt-Varianten gleichzeitig installiert sind. Zusätzliche Ausschlüsse kannst du über wiederholte
+`--exclude` Argumente konfigurieren.
 
 ### 5. Trainiertes Modell wiederverwenden
 

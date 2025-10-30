@@ -7,6 +7,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterable, List
+
+DEFAULT_QT_EXCLUDES: tuple[str, ...] = ("PyQt6", "PyQt5", "PySide6", "PySide2")
 
 
 def _require_pyinstaller() -> None:
@@ -20,6 +23,11 @@ def _require_pyinstaller() -> None:
 
 def _format_data_arg(source: Path, target: str = ".") -> str:
     return f"{source}{os.pathsep}{target}"
+
+
+def _extend_with_excludes(cmd: List[str], modules: Iterable[str]) -> None:
+    for module in modules:
+        cmd.extend(["--exclude-module", module])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -40,6 +48,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Leert vor dem Build die PyInstaller build/dist Verzeichnisse",
     )
+    parser.add_argument(
+        "--keep-qt",
+        action="store_true",
+        help=(
+            "Standardmäßig werden PyQt/PySide-Module ausgeschlossen, um Konflikte zwischen mehreren Qt-"
+            "Bindings zu vermeiden. Mit diesem Flag kannst du diese Ausschlüsse deaktivieren."
+        ),
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="MODUL",
+        help="Zusätzliche Module, die via --exclude-module an PyInstaller übergeben werden sollen",
+    )
     args = parser.parse_args(argv)
 
     _require_pyinstaller()
@@ -54,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             if folder.exists():
                 shutil.rmtree(folder)
 
-    cmd = [
+    cmd: List[str] = [
         sys.executable,
         "-m",
         "PyInstaller",
@@ -78,11 +101,34 @@ def main(argv: list[str] | None = None) -> int:
         if dep.exists():
             cmd.extend(["--add-data", _format_data_arg(dep)])
 
+    excludes: List[str] = list(args.exclude)
+    if not args.keep_qt:
+        excludes.extend(DEFAULT_QT_EXCLUDES)
+    _extend_with_excludes(cmd, excludes)
+
     cmd.append(str(script))
 
     print("Starte PyInstaller Build:")
     print(" ".join(cmd))
-    subprocess.run(cmd, check=True)
+    result = subprocess.run(
+        cmd,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if result.stdout:
+        print(result.stdout)
+
+    if result.returncode != 0:
+        if "multiple Qt bindings packages" in (result.stdout or "") and not args.keep_qt:
+            print(
+                "Hinweis: PyInstaller hat mehrere Qt-Bindings gefunden. Standardmäßig wurden PyQt/PySide"
+                "-Pakete ausgeschlossen. Sollte dein Build dennoch Qt benötigen, wiederhole den Befehl"
+                " mit --keep-qt und sorge dafür, dass nur eine Qt-Variante installiert ist."
+            )
+        raise SystemExit(result.returncode)
+
     print("Build abgeschlossen. Ergebnis liegt im 'dist' Verzeichnis.")
     return 0
 
