@@ -1,13 +1,13 @@
 # SPT Deep Learning Classifier - Python Requirements
-# Version: 2.0
+# Version: 2.1
 # Python: >=3.8
 
 # Core Deep Learning
-tensorflow>=2.10.0
-keras>=2.10.0
+tensorflow>=2.10.0,<2.16.0
+keras>=2.10.0,<3.0.0
 
 # Numerical Computing
-numpy>=1.21.0
+numpy>=1.21.0,<2.0.0
 scipy>=1.7.0
 
 # Machine Learning
@@ -17,10 +17,24 @@ scikit-learn>=1.0.0
 matplotlib>=3.4.0
 seaborn>=0.11.0
 
+# Progress bars and utilities
+tqdm>=4.62.0
+
 # Optional: GPU Support (uncomment if you have NVIDIA GPU)
 # tensorflow[and-cuda]>=2.10.0
 
-# Optional: Jupyter Notebook
+# Optional: Jupyter Notebook (uncomment for interactive notebooks)
 # jupyter>=1.0.0
 # notebook>=6.4.0
 # ipykernel>=6.0.0
+
+# Optional: Model export and interoperability
+# onnx>=1.12.0
+# tf2onnx>=1.13.0
+
+# Development dependencies (uncomment for development)
+# pytest>=7.0.0
+# pytest-cov>=3.0.0
+# black>=22.0.0
+# flake8>=4.0.0
+# mypy>=0.950

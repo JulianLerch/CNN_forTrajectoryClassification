@@ -1,0 +1,56 @@
+MIT License
+
+Copyright (c) 2025 Julian Lerch - SPT Deep Learning Classifier
+Masterthesis: TDI-G0 Diffusion in Polymer Matrices
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+ACADEMIC USE AND CITATION
+--------------------------
+
+This software was developed as part of a scientific Master's thesis on
+Single-Particle Tracking diffusion classification using Deep Learning.
+
+If you use this software in academic work, please cite it appropriately.
+
+For scientific publications, please reference:
+- The original thesis/publication (when available)
+- This repository: https://github.com/JulianLerch/CNN_forTrajectoryClassification
+
+SCIENTIFIC REFERENCES
+---------------------
+
+This implementation is based on the following scientific literature:
+
+[1] Granik, N., & Weiss, L. E. (2019). "Single-particle diffusion
+    characterization by deep learning." Bioinformatics, 35(18), 3510-3517.
+
+[2] Hochreiter, S., & Schmidhuber, J. (1997). "Long short-term memory."
+    Neural Computation, 9(8), 1735-1780.
+
+[3] Vaswani, A., et al. (2017). "Attention is all you need."
+    Advances in Neural Information Processing Systems, 30.
+
+[4] Michalet, X. (2010). "Mean square displacement analysis of single-particle
+    trajectories with localization error." Physical Review E, 82(4), 041914.
+
+[5] Kepten, E., et al. (2015). "Guidelines for the fitting of anomalous
+    diffusion mean square displacement graphs." PLoS ONE, 10(2), e0117722.
