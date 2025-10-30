@@ -34,6 +34,7 @@ from tensorflow import keras
 from tensorflow.keras import layers, models
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 from tensorflow.keras.regularizers import l2
+from tensorflow.keras import mixed_precision
 
 # Sklearn Imports
 from sklearn.model_selection import train_test_split
@@ -50,6 +51,16 @@ print("SPT DEEP LEARNING CLASSIFIER - TRAINING SYSTEM")
 print("="*80)
 print(f"TensorFlow Version: {tf.__version__}")
 print(f"Keras Version: {keras.__version__}")
+
+# MIXED PRECISION TRAINING: 2x Speedup on modern GPUs!
+# Uses FP16 for computation, FP32 for numerical stability
+try:
+    policy = mixed_precision.Policy('mixed_float16')
+    mixed_precision.set_global_policy(policy)
+    print(f"Mixed Precision: ENABLED (FP16) - Expect ~2x speedup on GPU!")
+except Exception as e:
+    print(f"Mixed Precision: DISABLED (fallback to FP32) - {e}")
+
 print("="*80 + "\n")
 
 
@@ -266,27 +277,51 @@ class SPTClassifierTrainer:
             print("  â€¢ Confinement (Trappedness, Radius Ratio)")
             print("="*80 + "\n")
         
-        X_feat = self.feature_extractor.extract_batch(X_traj_list)
+        X_feat_all = self.feature_extractor.extract_batch(X_traj_list)
 
-        # Füge D-Werte, Polymerisierungsgrad und Dimensionalität als zusätzliche Features hinzu
-        # Diese erweitern die 24 physikalischen Features
-        D_log = np.log10(D_values).reshape(-1, 1)  # Log-transformiert für bessere Skalierung
-        poly_feat = poly_degrees.reshape(-1, 1)
+        # === FEATURE SELECTION: Top 10 wichtigste Features ===
+        # Reduzierung von 24 auf 7 Physics Features + 3 Experimental = 10 Total
+        # Verhindert Curse of Dimensionality!
 
-        # Dimensionalität als Feature: 0 für 2D, 1 für 3D
-        dim_feat = np.array([0.0 if traj.shape[1] == 2 else 1.0 for traj in X_traj_list]).reshape(-1, 1)
+        feature_names_all = list(self.feature_extractor.feature_names)
 
-        # Kombiniere alle Features
-        X_feat = np.concatenate([X_feat, D_log, poly_feat, dim_feat], axis=1)
+        # Top 7 Physics Features für Diffusionsklassifikation:
+        selected_physics_features = [
+            'msd_alpha',              # 1. DER wichtigste - direkter α Indikator
+            'msd_D_eff',              # 2. Effektiver Diffusionskoeffizient
+            'msd_linearity',          # 3. Linear vs non-linear MSD
+            'radius_of_gyration',     # 4. Räumliche Ausdehnung
+            'straightness',           # 5. Direktheit der Bewegung
+            'gaussianity',            # 6. Brownian vs non-Brownian
+            'trappedness'             # 7. Confinement detection
+        ]
+
+        # Finde Indizes der ausgewählten Features
+        selected_indices = [feature_names_all.index(name) for name in selected_physics_features if name in feature_names_all]
+        X_feat = X_feat_all[:, selected_indices]
+
+        # Füge 3 experimentelle Features hinzu
+        D_log = np.log10(D_values).reshape(-1, 1)  # 8. Input D-Wert
+        # poly_feat wird NICHT mehr verwendet - durch Augmentation irrelevant
+        dim_feat = np.array([0.0 if traj.shape[1] == 2 else 1.0 for traj in X_traj_list]).reshape(-1, 1)  # 9. 2D vs 3D
+
+        # Kombiniere: 7 Physics + 2 Experimental = 9 Features
+        # (Polymerisierung weg gelassen - macht mit Augmentation keinen Sinn)
+        X_feat = np.concatenate([X_feat, D_log, dim_feat], axis=1)
 
         self.n_features = X_feat.shape[1]
+        self.selected_feature_names = selected_physics_features + ['D_log10', 'dimensionality']
+
         if verbose:
             print(f"\nFeature-Matrix: {X_feat.shape}")
-            print(f"   Basis-Features: 24")
-            print(f"   + D-Wert (log10): 1")
-            print(f"   + Polymerisierungsgrad: 1")
-            print(f"   + Dimensionalität (2D/3D): 1")
-            print(f"   = Gesamt: {X_feat.shape[1]} Features pro Sample")
+            print(f"   === FEATURE SELECTION: Top 9 Features ===")
+            print(f"   Physics Features (7):")
+            for i, name in enumerate(selected_physics_features, 1):
+                print(f"     {i}. {name}")
+            print(f"   Experimental Features (2):")
+            print(f"     8. D_log10 (input diffusion coefficient)")
+            print(f"     9. dimensionality (2D/3D)")
+            print(f"   TOTAL: {self.n_features} features (reduced from 27!)")
         
         # Padding der Trajektorien
         if verbose:
@@ -527,8 +562,8 @@ class SPTClassifierTrainer:
         x = layers.BatchNormalization(name='bn_fusion2')(x)
         x = layers.Dropout(0.4, name='fusion_dropout2')(x)
         
-        # Output Layer
-        outputs = layers.Dense(4, activation='softmax', name='output')(x)
+        # Output Layer (FP32 for numerical stability with mixed precision)
+        outputs = layers.Dense(4, activation='softmax', dtype='float32', name='output')(x)
         
         # Build Model
         model = models.Model(
@@ -1050,22 +1085,28 @@ class SPTClassifierTrainer:
         if verbose:
             print(f"Feature Scaler gespeichert: {scaler_path}")
         
-        # Feature Names
+        # Feature Names (UPDATED: inkl. D, Poly, Dim)
         feature_names_path = os.path.join(self.output_dir, 'feature_names.pkl')
+        feature_names_full = list(self.feature_extractor.feature_names) + ['D_log10', 'polymerization_degree', 'dimensionality']
         with open(feature_names_path, 'wb') as f:
-            pickle.dump(list(self.feature_extractor.feature_names) + ['is_3D'], f)
+            pickle.dump(feature_names_full, f)
         if verbose:
             print(f"Feature Names gespeichert: {feature_names_path}")
+            print(f"  Total Features: {len(feature_names_full)} (24 physics + 3 experimental)")
         
         # Metadata
         metadata = {
             'creation_date': datetime.now().isoformat(),
             'max_length': self.max_length,
             'n_features': self.n_features,
+            'n_physics_features': 24,
+            'n_experimental_features': 3,
+            'experimental_features': ['D_log10', 'polymerization_degree', 'dimensionality'],
             'input_dim': self.input_dim,
             'class_names': self.class_names,
             'random_seed': self.random_seed,
-            'total_parameters': self.model.count_params()
+            'total_parameters': self.model.count_params(),
+            'model_version': '2.0_full_D_range_augmented'
         }
         
         metadata_path = os.path.join(self.output_dir, 'metadata.json')
@@ -1087,6 +1128,81 @@ class SPTClassifierTrainer:
             print("="*80)
             print(f"ALLE DATEIEN IN: {self.output_dir}/")
             print("="*80)
+
+    @staticmethod
+    def load_model(model_dir: str, verbose: bool = True):
+        """
+        Lade trainiertes Modell und alle Metadaten
+
+        Args:
+            model_dir: Verzeichnis mit gespeichertem Modell
+            verbose: Print Output?
+
+        Returns:
+            Dictionary mit: model, scaler, feature_extractor, metadata, feature_names
+        """
+        import json
+
+        if verbose:
+            print("\n" + "="*80)
+            print("MODELL LADEN")
+            print("="*80)
+            print(f"Lade aus: {model_dir}")
+
+        # Load Model
+        model_path = os.path.join(model_dir, 'spt_classifier.keras')
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model not found: {model_path}")
+        model = keras.models.load_model(model_path)
+        if verbose:
+            print(f"Modell geladen: {model_path}")
+
+        # Load Scaler
+        scaler_path = os.path.join(model_dir, 'feature_scaler.pkl')
+        if not os.path.exists(scaler_path):
+            raise FileNotFoundError(f"Scaler not found: {scaler_path}")
+        with open(scaler_path, 'rb') as f:
+            scaler = pickle.load(f)
+        if verbose:
+            print(f"Scaler geladen: {scaler_path}")
+
+        # Load Feature Names
+        feature_names_path = os.path.join(model_dir, 'feature_names.pkl')
+        if not os.path.exists(feature_names_path):
+            raise FileNotFoundError(f"Feature names not found: {feature_names_path}")
+        with open(feature_names_path, 'rb') as f:
+            feature_names = pickle.load(f)
+        if verbose:
+            print(f"Feature Names geladen: {len(feature_names)} features")
+
+        # Load Metadata
+        metadata_path = os.path.join(model_dir, 'metadata.json')
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(f"Metadata not found: {metadata_path}")
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        if verbose:
+            print(f"Metadata geladen:")
+            print(f"  Version: {metadata.get('model_version', 'unknown')}")
+            print(f"  Created: {metadata.get('creation_date', 'unknown')}")
+            print(f"  Classes: {metadata.get('class_names', [])}")
+            print(f"  Features: {metadata.get('n_features', '?')}")
+
+        # Create Feature Extractor instance
+        feature_extractor = SPTFeatureExtractor(dt=0.01)
+
+        if verbose:
+            print("="*80)
+            print("MODELL ERFOLGREICH GELADEN!")
+            print("="*80 + "\n")
+
+        return {
+            'model': model,
+            'scaler': scaler,
+            'feature_extractor': feature_extractor,
+            'metadata': metadata,
+            'feature_names': feature_names
+        }
 
 
 def run_complete_training(

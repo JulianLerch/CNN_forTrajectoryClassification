@@ -48,14 +48,14 @@ class TrainingApp:
         self.training_thread: threading.Thread | None = None
         self.trainer: SPTClassifierTrainer | None = None
 
-        # GUI-States (OPTIMIERT für "Press Start & Go"!)
-        self.samples_var = tk.IntVar(value=10000)  # Erhöht: 500 -> 10000
+        # GUI-States (OPTIMIERT für schnelle Iterationen!)
+        self.samples_var = tk.IntVar(value=2000)    # KLEINER: 2000 für schnelle Epochen!
         self.mode_var = tk.StringVar(value="both")  # 2D+3D für beste Generalisierung
         self.ratio_var = tk.DoubleVar(value=0.5)    # 50/50 2D/3D
         self.poly_var = tk.DoubleVar(value=0.5)     # Wird durch Augmentation überschrieben
-        self.epochs_var = tk.IntVar(value=100)      # Erhöht: 60 -> 100
-        self.batch_var = tk.IntVar(value=512)       # Erhöht: 128 -> 512 (schneller!)
-        self.max_len_var = tk.IntVar(value=500)     # Optimiert: 600 -> 500
+        self.epochs_var = tk.IntVar(value=100)      # 100 Epochen pro Iteration
+        self.batch_var = tk.IntVar(value=512)       # Große Batches für Geschwindigkeit
+        self.max_len_var = tk.IntVar(value=500)     # 30-500 Frames (schnell!)
         default_output = Path("./spt_trained_model_app").resolve()
         self.output_dir_var = tk.StringVar(value=str(default_output))
 
@@ -103,8 +103,10 @@ class TrainingApp:
         self.ratio_label = ttk.Label(config_frame, text="50 %")
         self.ratio_label.grid(row=1, column=2, sticky="w", padx=5, pady=5)
 
-        ttk.Label(config_frame, text="Polymerisationsgrad:").grid(row=1, column=3, sticky="w", padx=5, pady=5)
-        ttk.Scale(config_frame, from_=0.0, to=1.0, variable=self.poly_var).grid(row=1, column=4, sticky="we", padx=5, pady=5)
+        # Info: Polygrad wird durch Augmentation überschrieben
+        info_label = ttk.Label(config_frame, text="ℹ️ Polymerisationsgrad: Training nutzt ALLE Grade (0-100%) automatisch!",
+                              foreground='blue', font=('', 9, 'italic'))
+        info_label.grid(row=1, column=3, columnspan=3, sticky="w", padx=5, pady=5)
 
         ttk.Label(config_frame, text="Max. Trajektorienlänge:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
         ttk.Spinbox(config_frame, from_=50, to=5000, textvariable=self.max_len_var, increment=50, width=10).grid(
